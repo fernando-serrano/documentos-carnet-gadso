@@ -78,7 +78,14 @@ La carpeta de auditoria conserva como maximo 10 corridas historicas por defecto.
 
 ## Retencion De Lotes
 
-La carpeta `lotes` conserva como maximo 10 lotes por defecto. Ese limite puede ajustarse con `GALENIUS_MAX_LOTE_DIRS`.
+La carpeta `lotes` conserva como maximo 10 lotes por defecto de forma global (sin separar por tipo de flujo).
+
+Esto significa que el tope se aplica al total combinado de lotes Galenius y Foto Carne dentro de `lotes`.
+
+Variables de control del tope:
+
+- `GALENIUS_MAX_LOTE_DIRS` (base global, default 10)
+- `FOTO_CARNE_MAX_LOTE_DIRS` (opcional para Foto Carne; si no se define, usa `GALENIUS_MAX_LOTE_DIRS`)
 
 ## Validacion De Peso
 
@@ -155,6 +162,7 @@ Salida local de Foto Carne:
 - `FOTO_CARNE_OVERWRITE_EXISTING=0`
 - `FOTO_CARNE_LOTES_DIR=lotes`
 - `FOTO_CARNE_LOG_DIR=logs/foto_carne`
+- `FOTO_CARNE_MAX_LOTE_DIRS` usa `GALENIUS_MAX_LOTE_DIRS` por defecto
 
 Nota de compresion:
 

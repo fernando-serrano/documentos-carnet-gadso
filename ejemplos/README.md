@@ -321,6 +321,12 @@ Defaults actuales:
 - `FOTO_CARNE_OVERWRITE_EXISTING=0`
 - `FOTO_CARNE_LOTES_DIR=lotes`
 - `FOTO_CARNE_LOG_DIR=logs/foto_carne`
+- `FOTO_CARNE_MAX_LOTE_DIRS` (si no se define, usa `GALENIUS_MAX_LOTE_DIRS`, default global 10)
+
+Retencion global de lotes:
+
+- El limite de lotes se aplica a toda la carpeta `lotes`.
+- No se separa el conteo por tipo de flujo (Galenius vs Foto Carne).
 
 Estados usados por defecto:
 

@@ -1,5 +1,4 @@
 from datetime import datetime
-import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue, Empty
 from pathlib import Path
@@ -7,6 +6,7 @@ from pathlib import Path
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+from flows.lotes_utils import prune_old_lote_dirs_global
 from .config import GaleniusConfig
 from .logging_utils import setup_worker_logging
 from .documents import (
@@ -161,19 +161,6 @@ def _preparar_sesion_autenticada(cfg: GaleniusConfig, logger, event_logger, run_
         finally:
             context.close()
             browser.close()
-
-
-def _prune_old_lote_dirs(lotes_root, max_lote_dirs: int) -> None:
-    if max_lote_dirs <= 0 or not lotes_root.exists():
-        return
-
-    lote_dirs = [path for path in lotes_root.iterdir() if path.is_dir()]
-    if len(lote_dirs) <= max_lote_dirs:
-        return
-
-    lote_dirs.sort(key=lambda path: path.stat().st_mtime)
-    for path in lote_dirs[:-max_lote_dirs]:
-        shutil.rmtree(path, ignore_errors=True)
 
 
 def _marcar_fila(sheet_url: str, row_number: int, fieldnames: list[str], cfg: GaleniusConfig, estado: str, logger, dni: str, observacion: str = "") -> None:
@@ -367,7 +354,7 @@ def ejecutar_flujo_galenius(cfg: GaleniusConfig, run_dir, logger, event_logger) 
     lote_nombre, lote_dir = _crear_directorio_lote(cfg)
     logger.info("[GALENIUS] Directorio de lote creado | lote=%s | ruta=%s", lote_nombre, lote_dir)
     event_logger.event("lote_start", lote=lote_nombre, lote_dir=str(lote_dir))
-    _prune_old_lote_dirs(cfg.base_dir / "lotes", cfg.max_lote_dirs)
+    prune_old_lote_dirs_global(cfg.base_dir / "lotes", cfg.max_lote_dirs)
 
     pendientes, fieldnames = _cargar_cola_documentos(cfg, logger)
     if not pendientes:

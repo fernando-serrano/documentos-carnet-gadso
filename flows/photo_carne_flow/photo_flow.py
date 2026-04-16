@@ -105,12 +105,160 @@ def _descargar_drive_bytes(file_id: str, credentials_path: str) -> tuple[bytes, 
     return bytes(content), mime
 
 
+def _cargar_cv2():
+    cv2_mod = getattr(_thread_local, "cv2_mod", None)
+    if cv2_mod is not None:
+        return cv2_mod
+    try:
+        cv2_mod = importlib.import_module("cv2")
+    except Exception:
+        cv2_mod = False
+    _thread_local.cv2_mod = cv2_mod
+    return cv2_mod
+
+
+def _detectar_rostros_frontal(img_rgb: Image.Image) -> list[tuple[int, int, int, int]]:
+    cv2_mod = _cargar_cv2()
+    if cv2_mod is False:
+        return []
+
+    cascade = getattr(_thread_local, "face_cascade", None)
+    if cascade is None:
+        try:
+            cascade_path = str(cv2_mod.data.haarcascades) + "haarcascade_frontalface_default.xml"
+            cascade = cv2_mod.CascadeClassifier(cascade_path)
+            if cascade.empty():
+                _thread_local.face_cascade = False
+                return []
+            _thread_local.face_cascade = cascade
+        except Exception:
+            _thread_local.face_cascade = False
+            return []
+    elif cascade is False:
+        return []
+
+    np_mod = importlib.import_module("numpy")
+    arr = np_mod.array(img_rgb)
+    gray = cv2_mod.cvtColor(arr, cv2_mod.COLOR_RGB2GRAY)
+    gray = cv2_mod.equalizeHist(gray)
+
+    faces = cascade.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=6,
+        minSize=(80, 80),
+    )
+    boxes = [tuple(int(v) for v in face) for face in faces]
+    boxes.sort(key=lambda box: box[2] * box[3], reverse=True)
+    return boxes
+
+
+def _seleccionar_rostro_confiable(
+    faces: list[tuple[int, int, int, int]],
+    img_w: int,
+    img_h: int,
+) -> tuple[int, int, int, int] | None:
+    if not faces:
+        return None
+
+    face0 = faces[0]
+    area0 = face0[2] * face0[3]
+    if area0 < int(img_w * img_h * 0.04):
+        return None
+
+    if len(faces) > 1:
+        area1 = faces[1][2] * faces[1][3]
+        # Si hay dos rostros de tamano similar, evitamos recortes agresivos para no crear falsos positivos.
+        if area0 < int(area1 * 1.35):
+            return None
+
+    return face0
+
+
+def _calcular_recorte_formal(
+    img_w: int,
+    img_h: int,
+    face: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    fx, fy, fw, fh = face
+    target_aspect = 3.0 / 4.0
+
+    crop_h = int(max(fh * 2.7, fh / 0.34))
+    crop_h = max(fh + 80, min(crop_h, img_h))
+    crop_w = int(crop_h * target_aspect)
+
+    if crop_w > img_w:
+        crop_w = img_w
+        crop_h = int(crop_w / target_aspect)
+        crop_h = min(crop_h, img_h)
+
+    face_cx = fx + (fw / 2.0)
+    face_cy = fy + (fh * 0.45)
+
+    x1 = int(round(face_cx - (crop_w / 2.0)))
+    y1 = int(round(face_cy - (crop_h * 0.38)))
+
+    x1 = max(0, min(x1, img_w - crop_w))
+    y1 = max(0, min(y1, img_h - crop_h))
+
+    return (x1, y1, x1 + crop_w, y1 + crop_h)
+
+
+def _forzar_relacion_3x4(img_rgb: Image.Image) -> tuple[Image.Image, str]:
+    w, h = img_rgb.size
+    target_aspect = 3.0 / 4.0
+    current_aspect = w / float(h)
+
+    if abs(current_aspect - target_aspect) <= 0.02:
+        return img_rgb, ""
+
+    if current_aspect > target_aspect:
+        crop_w = int(h * target_aspect)
+        x1 = max(0, (w - crop_w) // 2)
+        cropped = img_rgb.crop((x1, 0, x1 + crop_w, h))
+        return cropped, "aspect_crop_width"
+
+    crop_h = int(w / target_aspect)
+    y1 = max(0, int((h - crop_h) * 0.45))
+    cropped = img_rgb.crop((0, y1, w, y1 + crop_h))
+    return cropped, "aspect_crop_height"
+
+
+def _aplicar_pretratamiento_general(image: Image.Image) -> tuple[Image.Image, str]:
+    img = ImageOps.exif_transpose(image).convert("RGB")
+    detalles: list[str] = []
+
+    try:
+        faces = _detectar_rostros_frontal(img)
+    except Exception:
+        faces = []
+
+    if faces:
+        face = _seleccionar_rostro_confiable(faces, img.size[0], img.size[1])
+        if face is not None:
+            top_ratio = face[1] / float(max(1, img.size[1]))
+            box = _calcular_recorte_formal(img.size[0], img.size[1], face)
+            img = img.crop(box)
+            if top_ratio > 0.22:
+                detalles.append("top_margin_trimmed")
+            detalles.append("face_crop_applied")
+        else:
+            detalles.append("face_ambiguous_skip_crop")
+    else:
+        detalles.append("face_not_detected_skip_crop")
+
+    img, aspect_detail = _forzar_relacion_3x4(img)
+    if aspect_detail:
+        detalles.append(aspect_detail)
+
+    return img, ";".join(detalles)
+
+
 def _jpeg_menor_a_limite(image: Image.Image, target_bytes: int) -> tuple[bytes, str]:
     if target_bytes <= 0:
         raise RuntimeError("Limite de bytes invalido para foto")
 
-    # Corrige orientacion EXIF antes de comprimir para evitar resultados inconsistentes.
-    img = ImageOps.exif_transpose(image).convert("RGB")
+    img = image.convert("RGB")
     base_w, base_h = img.size
 
     for scale in (1.0, 0.92, 0.85, 0.78, 0.7, 0.62, 0.55, 0.48, 0.42, 0.36):
@@ -206,13 +354,22 @@ def procesar_foto_carne_por_dni(
     content, mime = _descargar_drive_bytes(file_id, credentials_path)
     image = Image.open(io.BytesIO(content))
 
+    pre_img = image
+    pre_detail = "preprocess_skip"
+    try:
+        pre_img, pre_detail = _aplicar_pretratamiento_general(image)
+    except Exception as exc:
+        pre_detail = f"preprocess_error={exc}"
+
     target_bytes = max(1, int(max_kb * 1024 * headroom_pct))
-    out_jpg, detail = _jpeg_menor_a_limite(image, target_bytes)
+    out_jpg, detail = _jpeg_menor_a_limite(pre_img, target_bytes)
     local_path = _guardar_foto_local(lote_dir, dni_digits, out_jpg, overwrite_existing)
+
+    detail_full = f"{pre_detail} {detail}".strip()
 
     return {
         "status": "ok",
         "observation": "DESCARGADO SIN OBSERVACIONES",
-        "detail": f"mime={mime} {detail}",
+        "detail": f"mime={mime} {detail_full}",
         "local_path": str(local_path),
     }

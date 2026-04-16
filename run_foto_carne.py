@@ -8,6 +8,7 @@ from queue import Empty, Queue
 
 from dotenv import load_dotenv
 
+from flows.lotes_utils import prune_old_lote_dirs_global
 from flows.photo_carne_flow.photo_flow import cargar_fuente_foto_por_dni, procesar_foto_carne_por_dni
 from flows.photo_carne_flow.sheets import read_google_sheet_rows, resolve_sheet_columns, update_sheet_row
 
@@ -39,6 +40,7 @@ class FotoCarneConfig:
     estado_error: str
     estado_sin_registros: str
     worker_count: int
+    max_lote_dirs: int
 
 
 def load_foto_carne_config() -> FotoCarneConfig:
@@ -58,6 +60,7 @@ def load_foto_carne_config() -> FotoCarneConfig:
     estado_error = str(os.getenv("FOTO_CARNE_ESTADO_ERROR", "ERROR")).strip()
     estado_sin_registros = str(os.getenv("FOTO_CARNE_ESTADO_SIN_REGISTROS", "SIN REGISTROS")).strip()
     worker_count = max(1, min(4, int(str(os.getenv("FOTO_CARNE_WORKERS", "4") or "4").strip())))
+    max_lote_dirs = max(1, int(str(os.getenv("FOTO_CARNE_MAX_LOTE_DIRS", os.getenv("GALENIUS_MAX_LOTE_DIRS", "10")) or "10").strip()))
 
     return FotoCarneConfig(
         base_dir=base_dir,
@@ -75,6 +78,7 @@ def load_foto_carne_config() -> FotoCarneConfig:
         estado_error=estado_error,
         estado_sin_registros=estado_sin_registros,
         worker_count=worker_count,
+        max_lote_dirs=max_lote_dirs,
     )
 
 
@@ -249,6 +253,7 @@ def main() -> int:
     cfg.lotes_root.mkdir(parents=True, exist_ok=True)
     lote_dir = cfg.lotes_root / f"lote-foto-carne-{datetime.now().strftime('%d-%m-%Y-%H-%M-%S')}"
     lote_dir.mkdir(parents=True, exist_ok=True)
+    prune_old_lote_dirs_global(cfg.lotes_root, cfg.max_lote_dirs)
 
     logger.info("[FOTO CARNE] Cola source=%s | fuente=%s", cfg.queue_sheet_url, cfg.source_sheet_url)
     foto_source_map = cargar_fuente_foto_por_dni(cfg.source_sheet_url, logger)
