@@ -1,10 +1,14 @@
 from datetime import datetime
 import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue, Empty
+from pathlib import Path
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from .config import GaleniusConfig
+from .logging_utils import setup_worker_logging
 from .documents import (
     abrir_vista_certificados,
     buscar_dni,
@@ -142,6 +146,23 @@ def _crear_directorio_lote(cfg: GaleniusConfig) -> tuple[str, object]:
     return lote_nombre, lote_dir
 
 
+def _preparar_sesion_autenticada(cfg: GaleniusConfig, logger, event_logger, run_dir) -> Path:
+    storage_state_path = run_dir / "galenius_storage_state.json"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=cfg.headless, slow_mo=0)
+        context = browser.new_context(no_viewport=True, ignore_https_errors=True, accept_downloads=True)
+        page = context.new_page()
+        try:
+            logger.info("[GALENIUS] Preparando sesion autenticada")
+            _ejecutar_login(page, cfg, logger, event_logger)
+            context.storage_state(path=str(storage_state_path))
+            event_logger.event("session_ready", storage_state=str(storage_state_path))
+            return storage_state_path
+        finally:
+            context.close()
+            browser.close()
+
+
 def _prune_old_lote_dirs(lotes_root, max_lote_dirs: int) -> None:
     if max_lote_dirs <= 0 or not lotes_root.exists():
         return
@@ -179,9 +200,8 @@ def _cargar_cola_documentos(cfg: GaleniusConfig, logger) -> tuple[list[dict], li
         estado = _estado_normalizado(row.get(estado_col, ""))
         if not dni:
             continue
-        if estado in estados_finales:
-            continue
-        pendientes.append(row)
+        if estado not in estados_finales:
+            pendientes.append(row)
 
     logger.info(
         "[GALENIUS] Cola cargada | total_filas=%s | pendientes=%s | hoja=%s",
@@ -192,42 +212,53 @@ def _cargar_cola_documentos(cfg: GaleniusConfig, logger) -> tuple[list[dict], li
     return pendientes, fieldnames
 
 
-def _procesar_registro_documental(page, cfg: GaleniusConfig, logger, event_logger, lote_dir, row: dict, fieldnames: list[str]) -> dict:
+def _procesar_registro_documental(
+    page,
+    cfg: GaleniusConfig,
+    logger,
+    event_logger,
+    lote_dir,
+    row: dict,
+    fieldnames: list[str],
+    worker_id: int | None = None,
+) -> dict:
     columnas = resolve_sheet_columns(fieldnames)
     dni_col = columnas.get("dni") or "DNI"
-    estado_col = columnas.get("estado_certificado_medico") or "ESTADO CERTIFICADO MEDICO"
     row_number = int(row.get("__row_number__", 0) or 0)
     dni = _normalizar_dni(row.get(dni_col, ""))
     if not dni:
         raise GaleniusFlowError(f"Fila {row_number} sin DNI valido")
 
-    logger.info("[GALENIUS][%s] Iniciando tratamiento documental | fila=%s", dni, row_number)
-    event_logger.event("document_start", dni=dni, row_number=row_number)
+    worker_tag = f"W{worker_id}" if worker_id else "W?"
+    logger.info("[GALENIUS][%s][%s] Iniciando tratamiento documental | fila=%s", worker_tag, dni, row_number)
+    event_logger.event("document_start", worker=worker_id, dni=dni, row_number=row_number)
 
-    _marcar_fila(cfg.queue_sheet_url, row_number, fieldnames, cfg, cfg.estado_en_proceso, logger, dni)
+    estado_en_proceso = f"{cfg.estado_en_proceso} W{worker_id}" if worker_id else cfg.estado_en_proceso
+    _marcar_fila(cfg.queue_sheet_url, row_number, fieldnames, cfg, estado_en_proceso, logger, dni)
 
     buscar_dni(page, dni, cfg)
     if detectar_sin_registros(page):
-        observacion = "SIN REGISTROS EXISTENTES"
+        observacion = f"{dni} SIN REGISTRO EXISTENTE"
         _marcar_fila(cfg.queue_sheet_url, row_number, fieldnames, cfg, cfg.estado_sin_resultados, logger, dni, observacion=observacion)
-        event_logger.event("document_finish", dni=dni, row_number=row_number, status="sin_registros", observation=observacion)
+        event_logger.event("document_finish", worker=worker_id, dni=dni, row_number=row_number, status="sin_registros", observation=observacion)
         return {"dni": dni, "row_number": row_number, "status": "sin_registros", "descargado": False}
 
     resultados = leer_resultados_certificados(page)
     if not resultados:
-        observacion = "SIN REGISTROS EXISTENTES"
+        observacion = f"{dni} SIN REGISTRO EXISTENTE"
         _marcar_fila(cfg.queue_sheet_url, row_number, fieldnames, cfg, cfg.estado_sin_resultados, logger, dni, observacion=observacion)
-        event_logger.event("document_finish", dni=dni, row_number=row_number, status="sin_registros")
+        event_logger.event("document_finish", worker=worker_id, dni=dni, row_number=row_number, status="sin_registros", observation=observacion)
         return {"dni": dni, "row_number": row_number, "status": "sin_registros", "descargado": False}
 
     seleccionado = elegir_resultado_mas_cercano(resultados)
     if seleccionado is None:
-        _marcar_fila(cfg.queue_sheet_url, row_number, fieldnames, cfg, cfg.estado_error, logger, dni)
-        event_logger.event("document_finish", dni=dni, row_number=row_number, status="sin_pdf")
+        _marcar_fila(cfg.queue_sheet_url, row_number, fieldnames, cfg, cfg.estado_error, logger, dni, observacion=f"{dni} PDF NO DISPONIBLE")
+        event_logger.event("document_finish", worker=worker_id, dni=dni, row_number=row_number, status="sin_pdf")
         return {"dni": dni, "row_number": row_number, "status": "sin_pdf", "descargado": False}
 
     logger.info(
-        "[GALENIUS][%s] Resultado seleccionado | orden=%s | fecha=%s | paciente=%s | empresa=%s",
+        "[GALENIUS][%s][%s] Resultado seleccionado | orden=%s | fecha=%s | paciente=%s | empresa=%s",
+        worker_tag,
         dni,
         seleccionado.numero_orden,
         seleccionado.fecha_atencion,
@@ -236,11 +267,12 @@ def _procesar_registro_documental(page, cfg: GaleniusConfig, logger, event_logge
     )
 
     archivo_local, detalle = descargar_pdf_resultado(page, cfg, seleccionado, dni, lote_dir)
-    logger.info("[GALENIUS][%s] PDF guardado | local=%s | detalle=%s", dni, archivo_local, detalle)
+    logger.info("[GALENIUS][%s][%s] PDF guardado | local=%s | detalle=%s", worker_tag, dni, archivo_local, detalle)
 
     _marcar_fila(cfg.queue_sheet_url, row_number, fieldnames, cfg, cfg.estado_descargado, logger, dni)
     event_logger.event(
         "document_finish",
+        worker=worker_id,
         dni=dni,
         row_number=row_number,
         status="ok",
@@ -259,6 +291,67 @@ def _procesar_registro_documental(page, cfg: GaleniusConfig, logger, event_logge
     }
 
 
+def _procesar_cola_worker(worker_id: int, cfg: GaleniusConfig, logger, event_logger, lote_dir, run_dir, storage_state_path: Path, tareas: Queue, fieldnames: list[str]) -> dict:
+    worker_tag = f"W{worker_id}"
+    resumen = {"procesados": 0, "descargados": 0, "sin_resultados": 0, "errores": 0}
+    worker_logger, worker_dir = setup_worker_logging(run_dir, worker_id)
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=cfg.headless, slow_mo=0)
+        context = browser.new_context(
+            storage_state=str(storage_state_path),
+            no_viewport=True,
+            ignore_https_errors=True,
+            accept_downloads=True,
+        )
+        page = context.new_page()
+        try:
+            logger.info("[GALENIUS][%s] Worker iniciado | log_dir=%s", worker_tag, worker_dir)
+            worker_logger.info("[GALENIUS][%s] Worker iniciado", worker_tag)
+            abrir_vista_certificados(page, cfg)
+
+            while True:
+                try:
+                    row = tareas.get_nowait()
+                except Empty:
+                    break
+
+                try:
+                    resultado = _procesar_registro_documental(
+                        page,
+                        cfg,
+                        worker_logger,
+                        event_logger,
+                        lote_dir,
+                        row,
+                        fieldnames,
+                        worker_id=worker_id,
+                    )
+                    resumen["procesados"] += 1
+                    if resultado.get("descargado"):
+                        resumen["descargados"] += 1
+                    elif resultado.get("status") == "sin_registros":
+                        resumen["sin_resultados"] += 1
+                except Exception as exc:
+                    resumen["errores"] += 1
+                    row_number = int(row.get("__row_number__", 0) or 0)
+                    dni = _normalizar_dni(row.get("DNI", row.get("dni", "")))
+                    try:
+                        if row_number:
+                            _marcar_fila(cfg.queue_sheet_url, row_number, fieldnames, cfg, cfg.estado_error, worker_logger, dni, observacion=f"{dni} ERROR DE TRATAMIENTO")
+                    except Exception:
+                        pass
+                    worker_logger.exception("[GALENIUS][%s][%s] Error procesando fila %s", worker_tag, dni, row_number)
+                    event_logger.event("document_error", worker=worker_id, dni=dni, row_number=row_number, detail=str(exc))
+
+            worker_logger.info("[GALENIUS][%s] Worker finalizado | resumen=%s", worker_tag, resumen)
+            event_logger.event("worker_finish", worker=worker_id, **resumen)
+            return resumen
+        finally:
+            context.close()
+            browser.close()
+
+
 def ejecutar_flujo_galenius(cfg: GaleniusConfig, run_dir, logger, event_logger) -> dict:
     """
     Script unico del flujo Galenius.
@@ -268,56 +361,77 @@ def ejecutar_flujo_galenius(cfg: GaleniusConfig, run_dir, logger, event_logger) 
     cfg.output_root.mkdir(parents=True, exist_ok=True)
     cfg.download_dir.mkdir(parents=True, exist_ok=True)
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=cfg.headless, slow_mo=0)
-        context = browser.new_context(no_viewport=True, ignore_https_errors=True, accept_downloads=True)
-        page = context.new_page()
-        try:
-            logger.info("[GALENIUS] Inicio flujo unico | login=%s", cfg.url_login)
-            event_logger.event("flow_start", stage="documentos", url=cfg.url_login, queue_sheet=cfg.queue_sheet_url)
-            final_url = _ejecutar_login(page, cfg, logger, event_logger)
-            abrir_vista_certificados(page, cfg)
-            lote_nombre, lote_dir = _crear_directorio_lote(cfg)
-            logger.info("[GALENIUS] Directorio de lote creado | lote=%s | ruta=%s", lote_nombre, lote_dir)
-            event_logger.event("lote_start", lote=lote_nombre, lote_dir=str(lote_dir))
-            _prune_old_lote_dirs(cfg.base_dir / "lotes", cfg.max_lote_dirs)
+    logger.info("[GALENIUS] Inicio flujo unico | login=%s", cfg.url_login)
+    event_logger.event("flow_start", stage="documentos", url=cfg.url_login, queue_sheet=cfg.queue_sheet_url)
 
-            pendientes, fieldnames = _cargar_cola_documentos(cfg, logger)
-            resumen = {
-                "descargados": 0,
-                "sin_resultados": 0,
-                "errores": 0,
-                "final_url": final_url,
-                "run_dir": str(run_dir),
-                "lote_dir": str(lote_dir),
-                "procesados": 0,
-            }
+    lote_nombre, lote_dir = _crear_directorio_lote(cfg)
+    logger.info("[GALENIUS] Directorio de lote creado | lote=%s | ruta=%s", lote_nombre, lote_dir)
+    event_logger.event("lote_start", lote=lote_nombre, lote_dir=str(lote_dir))
+    _prune_old_lote_dirs(cfg.base_dir / "lotes", cfg.max_lote_dirs)
 
-            for row in pendientes:
-                try:
-                    resultado = _procesar_registro_documental(page, cfg, logger, event_logger, lote_dir, row, fieldnames)
-                    resumen["procesados"] += 1
-                    if resultado.get("descargado"):
-                        resumen["descargados"] += 1
-                    elif resultado.get("status") == "sin_resultados":
-                        resumen["sin_resultados"] += 1
-                except Exception as exc:
-                    resumen["errores"] += 1
-                    row_number = int(row.get("__row_number__", 0) or 0)
-                    dni = _normalizar_dni(row.get("DNI", row.get("dni", "")))
-                    try:
-                        if row_number:
-                            _marcar_fila(cfg.queue_sheet_url, row_number, fieldnames, cfg, cfg.estado_error, logger, dni)
-                    except Exception:
-                        pass
-                    logger.exception("[GALENIUS][%s] Error procesando fila %s", dni, row_number)
-                    event_logger.event("document_error", dni=dni, row_number=row_number, detail=str(exc))
+    pendientes, fieldnames = _cargar_cola_documentos(cfg, logger)
+    if not pendientes:
+        resumen_vacio = {
+            "descargados": 0,
+            "sin_resultados": 0,
+            "errores": 0,
+            "final_url": cfg.certificados_url,
+            "run_dir": str(run_dir),
+            "lote_dir": str(lote_dir),
+            "procesados": 0,
+            "workers": 0,
+        }
+        event_logger.event("flow_finish", status="ok", **resumen_vacio)
+        return resumen_vacio
 
-            event_logger.event("flow_finish", status="ok", **resumen)
-            return resumen
-        except PlaywrightTimeoutError as exc:
-            event_logger.event("flow_error", reason="timeout", detail=str(exc))
-            raise GaleniusFlowError(f"Timeout en flujo Galenius: {exc}") from exc
-        finally:
-            context.close()
-            browser.close()
+    storage_state_path = _preparar_sesion_autenticada(cfg, logger, event_logger, run_dir)
+
+    worker_count = min(cfg.worker_count, len(pendientes))
+    tareas = Queue()
+    for row in pendientes:
+        tareas.put(row)
+
+    resumen = {
+        "descargados": 0,
+        "sin_resultados": 0,
+        "errores": 0,
+        "final_url": cfg.certificados_url,
+        "run_dir": str(run_dir),
+        "lote_dir": str(lote_dir),
+        "procesados": 0,
+        "workers": worker_count,
+    }
+
+    logger.info("[GALENIUS] Procesamiento multihilo activado | workers=%s | pendientes=%s", worker_count, len(pendientes))
+    event_logger.event("workers_start", workers=worker_count, pendientes=len(pendientes))
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                _procesar_cola_worker,
+                worker_id,
+                cfg,
+                logger,
+                event_logger,
+                lote_dir,
+                run_dir,
+                storage_state_path,
+                tareas,
+                fieldnames,
+            )
+            for worker_id in range(1, worker_count + 1)
+        ]
+        for future in as_completed(futures):
+            worker_resumen = future.result()
+            resumen["procesados"] += worker_resumen.get("procesados", 0)
+            resumen["descargados"] += worker_resumen.get("descargados", 0)
+            resumen["sin_resultados"] += worker_resumen.get("sin_resultados", 0)
+            resumen["errores"] += worker_resumen.get("errores", 0)
+
+    try:
+        storage_state_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    event_logger.event("flow_finish", status="ok", **resumen)
+    return resumen

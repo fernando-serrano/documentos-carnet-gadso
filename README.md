@@ -49,11 +49,11 @@ Si el PDF supera el umbral configurado, el flujo intenta optimizarlo antes de gu
 
 - `run_galenius.py`: entrypoint unico del flujo.
 - `run_galenius_login.bat`: launcher de Windows para ejecutar el flujo unico.
-- `galenius_flow/config.py`: configuracion por variables de entorno.
-- `galenius_flow/main_flow.py`: orquestacion del flujo actual.
-- `galenius_flow/selectors.py`: selectores de UI y candidatos de scraping.
-- `galenius_flow/scraping_utils.py`: utilidades de barrido y deteccion robusta.
-- `galenius_flow/logging_utils.py`: logging por corrida y eventos JSONL.
+- `flows/galenius_flow/config.py`: configuracion por variables de entorno.
+- `flows/galenius_flow/main_flow.py`: orquestacion del flujo actual.
+- `flows/galenius_flow/selectors.py`: selectores de UI y candidatos de scraping.
+- `flows/galenius_flow/scraping_utils.py`: utilidades de barrido y deteccion robusta.
+- `flows/galenius_flow/logging_utils.py`: logging por corrida y eventos JSONL.
 - `ejemplos/.env.galenius.example`: plantilla de variables para este flujo.
 
 ## Variables Minimas
@@ -92,14 +92,37 @@ run_galenius_login.bat
 
 Por defecto el navegador corre en modo invisible (`GALENIUS_HEADLESS=1`) para evitar ventanas abiertas durante el procesamiento. Si necesitas depurar visualmente, puedes cambiarlo a `0` de forma temporal.
 
+El flujo procesa por defecto con 4 workers en paralelo. Puedes ajustarlo con `GALENIUS_WORKERS`.
+
 ## Logs
 
 Por cada corrida se generan archivos en:
 
 - `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/galenius_flow.log`
 - `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/events.jsonl`
+- `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/workers/worker_1/worker_1.log`
+- `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/workers/worker_2/worker_2.log`
+- `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/workers/worker_3/worker_3.log`
+- `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/workers/worker_4/worker_4.log`
+
+Durante el procesamiento, el estado se registra como `EN PROCESO W#` para identificar qué worker está atendiendo cada fila.
 
 ## Nota De Contexto
 
 Este README aplica solo al flujo documental Galenius de este script.
 Cualquier logica del otro flujo (SUCAMEC) se gestiona en otro script/chat y no forma parte de este alcance.
+
+El tratamiento de Foto Carne fue desacoplado y se mantiene en una carpeta separada para evitar acoplamiento con este flujo.
+
+Su lógica es independiente: toma la cola desde `BOT DOCUMENTOS` por `DNI`, busca ese `DNI` en la hoja base de fotos y, si encuentra coincidencia, descarga la URL de `Cargar Foto` para guardarla dentro de su lote propio.
+
+Para ejecutarlo de forma independiente existe un runner separado en la raiz:
+
+- `run_foto_carne.py`
+- `run_foto_carne.bat`
+
+Variables principales para Foto Carne:
+
+- `FOTO_CARNE_QUEUE_SHEET_URL` o `GALENIUS_QUEUE_SHEET_URL` para leer la cola desde BOT DOCUMENTOS.
+- `FOTO_CARNE_SOURCE_SHEET_URL` para la hoja base donde vive `Cargar Foto`.
+- `FOTO_CARNE_DRIVE_CREDENTIALS_JSON` o `DRIVE_CREDENTIALS_JSON` para Google Drive/Sheets.

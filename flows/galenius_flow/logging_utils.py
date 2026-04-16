@@ -49,16 +49,41 @@ def setup_run_logging(logs_root: Path, run_name: str = "galenius", max_run_dirs:
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S"
-    )
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S")
 
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 
-    sh = logging.StreamHandler()
-    sh.setFormatter(formatter)
-    logger.addHandler(sh)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
 
     return logger, run_dir, JsonlEventLogger(events_file)
+
+
+def setup_worker_logging(run_dir: Path, worker_id: int) -> tuple[logging.Logger, Path]:
+    worker_dir = run_dir / "workers" / f"worker_{worker_id}"
+    worker_dir.mkdir(parents=True, exist_ok=True)
+
+    logger_name = f"galenius_worker_{worker_id}_{run_dir.name}"
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    if logger.handlers:
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S")
+    worker_log_file = worker_dir / f"worker_{worker_id}.log"
+
+    file_handler = logging.FileHandler(worker_log_file, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+    return logger, worker_dir

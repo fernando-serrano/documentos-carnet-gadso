@@ -45,10 +45,11 @@ class GaleniusConfig:
     pdf_size_headroom_pct: float
     audit_max_run_dirs: int
     max_lote_dirs: int
+    worker_count: int
 
 
 def load_galenius_config() -> GaleniusConfig:
-    base_dir = Path(__file__).resolve().parent.parent
+    base_dir = Path(__file__).resolve().parent.parent.parent
 
     url_login = str(
         os.getenv("GALENIUS_URL_LOGIN", "https://galenius.example.com/login")
@@ -106,6 +107,7 @@ def load_galenius_config() -> GaleniusConfig:
     pdf_size_headroom_pct = max(0.5, min(0.99, pdf_size_headroom_pct))
     audit_max_run_dirs = max(1, int(str(os.getenv("GALENIUS_AUDIT_MAX_RUN_DIRS", "10") or "10").strip()))
     max_lote_dirs = max(1, int(str(os.getenv("GALENIUS_MAX_LOTE_DIRS", "10") or "10").strip()))
+    worker_count = max(1, min(4, int(str(os.getenv("GALENIUS_WORKERS", "4") or "4").strip())))
 
     return GaleniusConfig(
         url_login=url_login,
@@ -132,4 +134,5 @@ def load_galenius_config() -> GaleniusConfig:
         pdf_size_headroom_pct=pdf_size_headroom_pct,
         audit_max_run_dirs=audit_max_run_dirs,
         max_lote_dirs=max_lote_dirs,
+        worker_count=worker_count,
     )

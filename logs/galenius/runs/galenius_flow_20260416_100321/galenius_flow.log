@@ -1,3 +1,0 @@
-2026-04-16 10:03:21 | INFO | [GALENIUS] Run dir: C:\Users\fserrano\Desktop\DOCUMENTOS-CARNET-GADSO\logs\galenius\runs\galenius_flow_20260416_100321
-2026-04-16 10:03:22 | INFO | [GALENIUS] Inicio flujo unico | login=https://autovias.galenius.com/login?next=/
-2026-04-16 10:03:58 | ERROR | [GALENIUS] Flujo fallido: No se pudo confirmar login exitoso. URL actual: https://autovias.galenius.com/7504e858-657f-4de8-89bf-3112dc65117b/armas/armas/certificados

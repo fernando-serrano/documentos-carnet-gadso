@@ -1,0 +1,254 @@
+import logging
+import os
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+from flows.photo_carne_flow.photo_flow import cargar_fuente_foto_por_dni, procesar_foto_carne_por_dni
+from flows.photo_carne_flow.sheets import read_google_sheet_rows, resolve_sheet_columns, update_sheet_row
+
+
+load_dotenv()
+
+
+def _as_bool(value: str, default: bool = False) -> bool:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "si", "sí", "on"}
+
+
+@dataclass
+class FotoCarneConfig:
+    base_dir: Path
+    logs_root: Path
+    lotes_root: Path
+    queue_sheet_url: str
+    source_sheet_url: str
+    drive_credentials_json: str
+    max_kb: int
+    headroom_pct: float
+    overwrite_existing: bool
+    responsable_default: str
+    estado_en_proceso: str
+    estado_descargado: str
+    estado_error: str
+    estado_sin_registros: str
+
+
+def load_foto_carne_config() -> FotoCarneConfig:
+    base_dir = Path(__file__).resolve().parent
+    logs_root = base_dir / str(os.getenv("FOTO_CARNE_LOG_DIR", "logs/foto_carne")).strip()
+    lotes_root = base_dir / str(os.getenv("FOTO_CARNE_LOTES_DIR", "lotes")).strip()
+    queue_sheet_url = str(os.getenv("FOTO_CARNE_QUEUE_SHEET_URL", os.getenv("GALENIUS_QUEUE_SHEET_URL", ""))).strip()
+    source_sheet_url = str(os.getenv("FOTO_CARNE_SOURCE_SHEET_URL", "")).strip()
+    drive_credentials_json = str(os.getenv("FOTO_CARNE_DRIVE_CREDENTIALS_JSON", os.getenv("DRIVE_CREDENTIALS_JSON", ""))).strip()
+    max_kb = max(20, int(str(os.getenv("FOTO_CARNE_MAX_KB", "80") or "80").strip()))
+    headroom_pct = float(str(os.getenv("FOTO_CARNE_HEADROOM_PCT", "0.95") or "0.95").strip())
+    headroom_pct = max(0.5, min(0.99, headroom_pct))
+    overwrite_existing = _as_bool(os.getenv("FOTO_CARNE_OVERWRITE_EXISTING", "0"), default=False)
+    responsable_default = str(os.getenv("FOTO_CARNE_RESPONSABLE_DEFAULT", os.getenv("GALENIUS_RESPONSABLE_DEFAULT", "BOT DOCUMENTOS SUCAMEC"))).strip()
+    estado_en_proceso = str(os.getenv("FOTO_CARNE_ESTADO_EN_PROCESO", "EN PROCESO")).strip()
+    estado_descargado = str(os.getenv("FOTO_CARNE_ESTADO_DESCARGADO", "DESCARGADO")).strip()
+    estado_error = str(os.getenv("FOTO_CARNE_ESTADO_ERROR", "ERROR")).strip()
+    estado_sin_registros = str(os.getenv("FOTO_CARNE_ESTADO_SIN_REGISTROS", "SIN REGISTROS")).strip()
+
+    return FotoCarneConfig(
+        base_dir=base_dir,
+        logs_root=logs_root,
+        lotes_root=lotes_root,
+        queue_sheet_url=queue_sheet_url,
+        source_sheet_url=source_sheet_url,
+        drive_credentials_json=drive_credentials_json,
+        max_kb=max_kb,
+        headroom_pct=headroom_pct,
+        overwrite_existing=overwrite_existing,
+        responsable_default=responsable_default,
+        estado_en_proceso=estado_en_proceso,
+        estado_descargado=estado_descargado,
+        estado_error=estado_error,
+        estado_sin_registros=estado_sin_registros,
+    )
+
+
+def _marcar_fila_foto_carne(
+    cfg: FotoCarneConfig,
+    fieldnames: list[str],
+    row_number: int,
+    estado: str,
+    observacion: str,
+    logger,
+) -> None:
+    updates = {
+        "ESTADO FOTO CARNÉ": estado,
+        "OBSERVACION FOTO CARNÉ": observacion,
+        "RESPONSABLE": cfg.responsable_default,
+        "FECHA TRAMITE": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+    }
+    update_sheet_row(cfg.queue_sheet_url, row_number, updates, fieldnames=fieldnames)
+    logger.info(
+        "[FOTO CARNE] Hoja actualizada | fila=%s | estado=%s | observacion=%s",
+        row_number,
+        estado,
+        observacion,
+    )
+
+
+def _setup_logger(logs_root: Path) -> tuple[logging.Logger, Path]:
+    logs_root.mkdir(parents=True, exist_ok=True)
+    run_dir = logs_root / f"foto_carne_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger(f"foto_carne_{run_dir.name}")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if logger.handlers:
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S")
+    handler = logging.FileHandler(run_dir / "foto_carne.log", encoding="utf-8")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    stream = logging.StreamHandler()
+    stream.setFormatter(formatter)
+    logger.addHandler(stream)
+    return logger, run_dir
+
+
+def main() -> int:
+    cfg = load_foto_carne_config()
+    logger, run_dir = _setup_logger(cfg.logs_root)
+
+    logger.info("[FOTO CARNE] Run dir: %s", run_dir)
+    if not cfg.queue_sheet_url:
+        logger.error("[FOTO CARNE] Falta FOTO_CARNE_QUEUE_SHEET_URL o GALENIUS_QUEUE_SHEET_URL en .env")
+        return 2
+    if not cfg.source_sheet_url:
+        logger.error("[FOTO CARNE] Falta FOTO_CARNE_SOURCE_SHEET_URL en .env")
+        return 2
+    if not cfg.drive_credentials_json:
+        logger.error("[FOTO CARNE] Falta FOTO_CARNE_DRIVE_CREDENTIALS_JSON o DRIVE_CREDENTIALS_JSON en .env")
+        return 2
+
+    cfg.lotes_root.mkdir(parents=True, exist_ok=True)
+    lote_dir = cfg.lotes_root / f"lote-foto-carne-{datetime.now().strftime('%d-%m-%Y-%H-%M-%S')}"
+    lote_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info("[FOTO CARNE] Cola source=%s | fuente=%s", cfg.queue_sheet_url, cfg.source_sheet_url)
+    foto_source_map = cargar_fuente_foto_por_dni(cfg.source_sheet_url, logger)
+    queue_rows, fieldnames = read_google_sheet_rows(cfg.queue_sheet_url)
+    columnas = resolve_sheet_columns(fieldnames)
+    dni_col = columnas.get("dni") or "DNI"
+
+    queue_items: list[tuple[str, int]] = []
+    for row in queue_rows:
+        dni = str(row.get(dni_col, "") or "").strip()
+        dni_digits = "".join(ch for ch in dni if ch.isdigit())
+        row_number = int(row.get("__row_number__", 0) or 0)
+        if dni_digits and row_number:
+            queue_items.append((dni_digits, row_number))
+
+    logger.info("[FOTO CARNE] Cola cargada | filas=%s | filas_validas=%s", len(queue_rows), len(queue_items))
+
+    procesados = 0
+    descargados = 0
+    sin_registros = 0
+    errores = 0
+
+    for dni, row_number in queue_items:
+        try:
+            _marcar_fila_foto_carne(
+                cfg,
+                fieldnames,
+                row_number,
+                f"{cfg.estado_en_proceso} FOTO CARNÉ",
+                "",
+                logger,
+            )
+
+            if dni not in foto_source_map:
+                sin_registros += 1
+                logger.info("[FOTO CARNE][%s] SIN COINCIDENCIA EN FUENTE", dni)
+                _marcar_fila_foto_carne(
+                    cfg,
+                    fieldnames,
+                    row_number,
+                    cfg.estado_sin_registros,
+                    f"{dni} SIN CARGAR FOTO EN FUENTE",
+                    logger,
+                )
+                continue
+
+            resultado = procesar_foto_carne_por_dni(
+                dni=dni,
+                foto_source_map=foto_source_map,
+                credentials_path=cfg.drive_credentials_json,
+                lote_dir=lote_dir,
+                max_kb=cfg.max_kb,
+                headroom_pct=cfg.headroom_pct,
+                overwrite_existing=cfg.overwrite_existing,
+            )
+            procesados += 1
+            if resultado.get("status") == "ok":
+                descargados += 1
+                logger.info("[FOTO CARNE][%s] OK | %s", dni, resultado.get("local_path", ""))
+                _marcar_fila_foto_carne(
+                    cfg,
+                    fieldnames,
+                    row_number,
+                    cfg.estado_descargado,
+                    str(resultado.get("observation", "DESCARGADO SIN OBSERVACIONES")),
+                    logger,
+                )
+            elif resultado.get("status") == "sin_registros":
+                sin_registros += 1
+                logger.info("[FOTO CARNE][%s] SIN REGISTROS | %s", dni, resultado.get("observation", ""))
+                _marcar_fila_foto_carne(
+                    cfg,
+                    fieldnames,
+                    row_number,
+                    cfg.estado_sin_registros,
+                    str(resultado.get("observation", "")),
+                    logger,
+                )
+            else:
+                errores += 1
+                logger.warning("[FOTO CARNE][%s] ERROR | %s | %s", dni, resultado.get("observation", ""), resultado.get("detail", ""))
+                _marcar_fila_foto_carne(
+                    cfg,
+                    fieldnames,
+                    row_number,
+                    cfg.estado_error,
+                    str(resultado.get("observation", "ERROR DE TRATAMIENTO")),
+                    logger,
+                )
+        except Exception as exc:
+            errores += 1
+            logger.exception("[FOTO CARNE][%s] Excepcion procesando foto: %s", dni, exc)
+            try:
+                _marcar_fila_foto_carne(
+                    cfg,
+                    fieldnames,
+                    row_number,
+                    cfg.estado_error,
+                    f"{dni} ERROR: {exc}",
+                    logger,
+                )
+            except Exception:
+                logger.exception("[FOTO CARNE][%s] No se pudo actualizar estado de error en hoja", dni)
+
+    logger.info(
+        "[FOTO CARNE] Flujo completado | procesados=%s | descargados=%s | sin_registros=%s | errores=%s | lote=%s",
+        procesados,
+        descargados,
+        sin_registros,
+        errores,
+        lote_dir,
+    )
+    return 0 if errores == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

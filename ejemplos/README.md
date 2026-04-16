@@ -270,11 +270,11 @@ python carnet_emision.py
 
 Se agrego una base no monolitica para el nuevo flujo de certificados medicos:
 
-- `galenius_flow/config.py`: carga y valida variables de entorno.
-- `galenius_flow/selectors.py`: selectores UI centralizados de Galenius.
-- `galenius_flow/scraping_utils.py`: barrido de elementos/mensajes por multiples selectores.
-- `galenius_flow/main_flow.py`: script unico del flujo (etapa actual: login robusto).
-- `galenius_flow/logging_utils.py`: logging por corrida y eventos JSONL.
+- `flows/galenius_flow/config.py`: carga y valida variables de entorno.
+- `flows/galenius_flow/selectors.py`: selectores UI centralizados de Galenius.
+- `flows/galenius_flow/scraping_utils.py`: barrido de elementos/mensajes por multiples selectores.
+- `flows/galenius_flow/main_flow.py`: script unico del flujo (etapa actual: login robusto).
+- `flows/galenius_flow/logging_utils.py`: logging por corrida y eventos JSONL.
 - `run_galenius.py`: entrypoint unico del flujo Galenius.
 - `run_galenius_login.bat`: launcher para Windows (invoca solo `run_galenius.py`).
 

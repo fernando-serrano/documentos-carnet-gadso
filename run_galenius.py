@@ -1,6 +1,6 @@
-from galenius_flow.config import load_galenius_config
-from galenius_flow.logging_utils import setup_run_logging
-from galenius_flow.main_flow import GaleniusFlowError, ejecutar_flujo_galenius
+from flows.galenius_flow.config import load_galenius_config
+from flows.galenius_flow.logging_utils import setup_run_logging
+from flows.galenius_flow.main_flow import GaleniusFlowError, ejecutar_flujo_galenius
 
 
 def main() -> int:
@@ -13,7 +13,8 @@ def main() -> int:
     try:
         resumen = ejecutar_flujo_galenius(cfg, run_dir, logger, event_logger)
         logger.info(
-            "[GALENIUS] Flujo completado | procesados=%s | descargados=%s | sin_resultados=%s | errores=%s",
+            "[GALENIUS] Flujo completado | workers=%s | procesados=%s | descargados=%s | sin_resultados=%s | errores=%s",
+            resumen.get("workers", 0),
             resumen.get("procesados", 0),
             resumen.get("descargados", 0),
             resumen.get("sin_resultados", 0),

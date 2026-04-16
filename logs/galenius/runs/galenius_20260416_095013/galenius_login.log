@@ -1,2 +1,0 @@
-2026-04-16 09:50:13 | INFO | [GALENIUS] Run dir: C:\Users\fserrano\Desktop\DOCUMENTOS-CARNET-GADSO\logs\galenius\runs\galenius_20260416_095013
-2026-04-16 09:50:13 | ERROR | [GALENIUS] Login fallido: Configuracion incompleta de login Galenius: ['GALENIUS_URL_LOGIN', 'GALENIUS_USERNAME', 'GALENIUS_PASSWORD']
