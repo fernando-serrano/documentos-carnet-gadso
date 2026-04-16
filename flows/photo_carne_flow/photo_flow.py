@@ -117,6 +117,18 @@ def _cargar_cv2():
     return cv2_mod
 
 
+def _cargar_rembg():
+    rembg_mod = getattr(_thread_local, "rembg_mod", None)
+    if rembg_mod is not None:
+        return rembg_mod
+    try:
+        rembg_mod = importlib.import_module("rembg")
+    except Exception:
+        rembg_mod = False
+    _thread_local.rembg_mod = rembg_mod
+    return rembg_mod
+
+
 def _detectar_rostros_frontal(img_rgb: Image.Image) -> list[tuple[int, int, int, int]]:
     cv2_mod = _cargar_cv2()
     if cv2_mod is False:
@@ -224,9 +236,135 @@ def _forzar_relacion_3x4(img_rgb: Image.Image) -> tuple[Image.Image, str]:
     return cropped, "aspect_crop_height"
 
 
-def _aplicar_pretratamiento_general(image: Image.Image) -> tuple[Image.Image, str]:
+def _fondo_es_mayormente_blanco(img_rgb: Image.Image) -> bool:
+    cv2_mod = _cargar_cv2()
+    if cv2_mod is False:
+        return False
+
+    np_mod = importlib.import_module("numpy")
+    arr = np_mod.array(img_rgb)
+    h, w = arr.shape[:2]
+    border_px = max(12, int(min(h, w) * 0.08))
+
+    strips = [
+        arr[:border_px, :, :],
+        arr[h - border_px :, :, :],
+        arr[:, :border_px, :],
+        arr[:, w - border_px :, :],
+    ]
+    border = np_mod.concatenate([s.reshape(-1, 3) for s in strips], axis=0)
+
+    white_mask = (border[:, 0] >= 235) & (border[:, 1] >= 235) & (border[:, 2] >= 235)
+    white_ratio = float(white_mask.mean()) if border.size else 0.0
+    return white_ratio >= 0.72
+
+
+def _limpiar_foto_ia(img_rgb: Image.Image) -> tuple[Image.Image, str, bool]:
+    """
+    Segmentación IA (rembg + U²-Net) para remover fondo.
+    Mucho más preciso que OpenCV clásico para fotos con iluminación irregular.
+    Devuelve (imagen_procesada, detalle, fue_aplicado).
+    """
+    rembg_mod = _cargar_rembg()
+    if rembg_mod is False:
+        return img_rgb, "bg_remove_ia_skip_rembg_unavailable", False
+
+    try:
+        # rembg.remove() retorna imagen con canal alpha (RGBA con fondo transparente)
+        output = rembg_mod.remove(img_rgb, alpha_matting=True, alpha_matting_foreground_threshold=240)
+
+        # Convertir a fondo blanco puro (SUCAMEC estándar)
+        background = Image.new("RGBA", output.size, (255, 255, 255, 255))
+        final = Image.alpha_composite(background, output)
+        final = final.convert("RGB")
+
+        # Post-procesado OpenCV ligero: bilateral filter para suavizar piel sin perder detalle
+        cv2_mod = _cargar_cv2()
+        if cv2_mod is not False:
+            try:
+                np_mod = importlib.import_module("numpy")
+                img_cv = cv2_mod.cvtColor(np_mod.array(final), cv2_mod.COLOR_RGB2BGR)
+                # Bilateral filter: suaviza piel pero preserva bordes
+                img_cv = cv2_mod.bilateralFilter(img_cv, 9, 75, 75)
+                img_cv = cv2_mod.cvtColor(img_cv, cv2_mod.COLOR_BGR2RGB)
+                final = Image.fromarray(img_cv)
+            except Exception:
+                # Si bilateral falla, usamos resultado sin suavizado
+                pass
+
+        return final, "bg_white_ia_applied", True
+
+    except Exception as exc:
+        return img_rgb, f"bg_remove_ia_error={exc}", False
+
+
+def _remover_fondo_blanco_conservador(img_rgb: Image.Image) -> tuple[Image.Image, str, bool]:
+    cv2_mod = _cargar_cv2()
+    if cv2_mod is False:
+        return img_rgb, "bg_remove_skip_no_cv2", False
+
+    np_mod = importlib.import_module("numpy")
+    arr = np_mod.array(img_rgb)
+    h, w = arr.shape[:2]
+
+    faces = _detectar_rostros_frontal(img_rgb)
+    face = _seleccionar_rostro_confiable(faces, w, h)
+    if face is None:
+        return img_rgb, "bg_remove_skip_face_not_confident", False
+
+    fx, fy, fw, fh = face
+    rect_x = max(1, int(fx - fw * 1.2))
+    rect_y = max(1, int(fy - fh * 0.8))
+    rect_w = min(w - rect_x - 1, int(fw * 3.4))
+    rect_h = min(h - rect_y - 1, int(fh * 5.0))
+
+    if rect_w < int(w * 0.35) or rect_h < int(h * 0.45):
+        margin = max(6, int(min(w, h) * 0.05))
+        rect_x = margin
+        rect_y = margin
+        rect_w = w - (margin * 2)
+        rect_h = h - (margin * 2)
+
+    if rect_w <= 2 or rect_h <= 2:
+        return img_rgb, "bg_remove_skip_invalid_rect", False
+
+    bgd_model = np_mod.zeros((1, 65), np_mod.float64)
+    fgd_model = np_mod.zeros((1, 65), np_mod.float64)
+    mask = np_mod.zeros((h, w), np_mod.uint8)
+
+    try:
+        cv2_mod.grabCut(
+            arr,
+            mask,
+            (int(rect_x), int(rect_y), int(rect_w), int(rect_h)),
+            bgd_model,
+            fgd_model,
+            3,
+            cv2_mod.GC_INIT_WITH_RECT,
+        )
+    except Exception as exc:
+        return img_rgb, f"bg_remove_skip_grabcut_error={exc}", False
+
+    fg_mask = (mask == cv2_mod.GC_FGD) | (mask == cv2_mod.GC_PR_FGD)
+    fg_ratio = float(fg_mask.mean())
+    if fg_ratio < 0.18 or fg_ratio > 0.86:
+        return img_rgb, "bg_remove_skip_unstable_mask", False
+
+    out = arr.copy()
+    out[~fg_mask] = (255, 255, 255)
+
+    white_bg_ratio = float((out[~fg_mask] >= 245).all(axis=1).mean()) if (~fg_mask).any() else 0.0
+    if white_bg_ratio < 0.95:
+        return img_rgb, "bg_remove_skip_low_white_ratio", False
+
+    out_img = Image.fromarray(out)
+    return out_img, "bg_white_applied", True
+
+
+def _aplicar_pretratamiento_general(image: Image.Image) -> tuple[Image.Image, str, bool]:
     img = ImageOps.exif_transpose(image).convert("RGB")
     detalles: list[str] = []
+    fondo_blanco_aplicado = False
 
     try:
         faces = _detectar_rostros_frontal(img)
@@ -251,22 +389,51 @@ def _aplicar_pretratamiento_general(image: Image.Image) -> tuple[Image.Image, st
     if aspect_detail:
         detalles.append(aspect_detail)
 
-    return img, ";".join(detalles)
+    if not _fondo_es_mayormente_blanco(img):
+        # Intentar IA primero (rembg + U²-Net), fallback a OpenCV si falla
+        img_bg, bg_detail, applied = _limpiar_foto_ia(img)
+        detalles.append(bg_detail)
+        if applied:
+            img = img_bg
+            fondo_blanco_aplicado = True
+        else:
+            # Fallback a OpenCV clásico si IA no fue aplicada
+            img_bg, bg_detail_cv, applied_cv = _remover_fondo_blanco_conservador(img)
+            detalles.append(bg_detail_cv)
+            if applied_cv:
+                img = img_bg
+                fondo_blanco_aplicado = True
+    else:
+        detalles.append("bg_already_white")
+
+    return img, ";".join(detalles), fondo_blanco_aplicado
 
 
-def _jpeg_menor_a_limite(image: Image.Image, target_bytes: int) -> tuple[bytes, str]:
+def _jpeg_menor_a_limite(
+    image: Image.Image,
+    target_bytes: int,
+    min_quality: int = 50,
+    max_oversize_pct: float = 1.15,
+) -> tuple[bytes, str]:
     if target_bytes <= 0:
         raise RuntimeError("Limite de bytes invalido para foto")
 
     img = image.convert("RGB")
     base_w, base_h = img.size
+    allow_bytes = int(max(1, target_bytes * max_oversize_pct))
+    best_candidate: tuple[int, int, float, bytes] | None = None
 
-    for scale in (1.0, 0.92, 0.85, 0.78, 0.7, 0.62, 0.55, 0.48, 0.42, 0.36):
+    quality_steps = tuple(range(95, min_quality - 1, -5))
+    if quality_steps[-1] != min_quality:
+        quality_steps += (min_quality,)
+    scale_steps = (1.0, 0.92, 0.85, 0.78, 0.72, 0.66, 0.60)
+
+    for scale in scale_steps:
         w = max(240, int(base_w * scale))
         h = max(320, int(base_h * scale))
         resized = img.resize((w, h), Image.LANCZOS)
 
-        for quality in (88, 82, 76, 70, 64, 58, 52, 46, 40, 34, 28, 24):
+        for quality in quality_steps:
             buffer = io.BytesIO()
             resized.save(
                 buffer,
@@ -277,17 +444,31 @@ def _jpeg_menor_a_limite(image: Image.Image, target_bytes: int) -> tuple[bytes, 
                 subsampling=2,
             )
             data = buffer.getvalue()
-            if len(data) <= target_bytes:
-                detalle = f"jpeg_ok size={len(data)} quality={quality} scale={scale:.2f}"
+            size = len(data)
+
+            if size <= target_bytes:
+                detalle = f"jpeg_ok size={size} quality={quality} scale={scale:.2f}"
                 return data, detalle
 
-    # Segunda fase: prioriza cumplir limite en casos extremos.
-    for scale in (0.32, 0.28, 0.24):
+            if size <= allow_bytes:
+                if best_candidate is None or quality > best_candidate[1] or (
+                    quality == best_candidate[1] and size < best_candidate[0]
+                ):
+                    best_candidate = (size, quality, scale, data)
+
+    if best_candidate is not None:
+        size, quality, scale, data = best_candidate
+        detalle = f"jpeg_ok_oversize size={size} quality={quality} scale={scale:.2f} oversize_pct={size/target_bytes:.2f}"
+        return data, detalle
+
+    # Segunda fase: solo si es estrictamente necesario intentamos versiones más agresivas,
+    # pero no bajamos de quality=30 para evitar resultados destrozados.
+    for scale in (0.50, 0.40, 0.32):
         w = max(160, int(base_w * scale))
         h = max(200, int(base_h * scale))
         resized = img.resize((w, h), Image.LANCZOS)
 
-        for quality in (22, 20, 18, 16):
+        for quality in (35, 30):
             buffer = io.BytesIO()
             resized.save(
                 buffer,
@@ -330,6 +511,8 @@ def procesar_foto_carne_por_dni(
     max_kb: int,
     headroom_pct: float,
     overwrite_existing: bool,
+    min_jpeg_quality: int,
+    max_jpeg_oversize_pct: float,
 ) -> dict:
     dni_digits = _normalizar_dni(dni)
     if not dni_digits:
@@ -356,20 +539,22 @@ def procesar_foto_carne_por_dni(
 
     pre_img = image
     pre_detail = "preprocess_skip"
+    fondo_blanco_aplicado = False
     try:
-        pre_img, pre_detail = _aplicar_pretratamiento_general(image)
+        pre_img, pre_detail, fondo_blanco_aplicado = _aplicar_pretratamiento_general(image)
     except Exception as exc:
         pre_detail = f"preprocess_error={exc}"
 
     target_bytes = max(1, int(max_kb * 1024 * headroom_pct))
-    out_jpg, detail = _jpeg_menor_a_limite(pre_img, target_bytes)
+    out_jpg, detail = _jpeg_menor_a_limite(pre_img, target_bytes, min_quality=min_jpeg_quality, max_oversize_pct=max_jpeg_oversize_pct)
     local_path = _guardar_foto_local(lote_dir, dni_digits, out_jpg, overwrite_existing)
 
     detail_full = f"{pre_detail} {detail}".strip()
+    observation = "DESCARGADO CON FONDO BLANCO" if fondo_blanco_aplicado else "DESCARGADO SIN OBSERVACIONES"
 
     return {
         "status": "ok",
-        "observation": "DESCARGADO SIN OBSERVACIONES",
+        "observation": observation,
         "detail": f"mime={mime} {detail_full}",
         "local_path": str(local_path),
     }

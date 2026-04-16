@@ -41,6 +41,8 @@ class FotoCarneConfig:
     estado_sin_registros: str
     worker_count: int
     max_lote_dirs: int
+    min_jpeg_quality: int
+    max_jpeg_oversize_pct: float
 
 
 def load_foto_carne_config() -> FotoCarneConfig:
@@ -61,6 +63,9 @@ def load_foto_carne_config() -> FotoCarneConfig:
     estado_sin_registros = str(os.getenv("FOTO_CARNE_ESTADO_SIN_REGISTROS", "SIN REGISTROS")).strip()
     worker_count = max(1, min(4, int(str(os.getenv("FOTO_CARNE_WORKERS", "4") or "4").strip())))
     max_lote_dirs = max(1, int(str(os.getenv("FOTO_CARNE_MAX_LOTE_DIRS", os.getenv("GALENIUS_MAX_LOTE_DIRS", "10")) or "10").strip()))
+    min_jpeg_quality = max(30, min(80, int(str(os.getenv("FOTO_CARNE_MIN_JPEG_QUALITY", "50") or "50").strip())))
+    max_jpeg_oversize_pct = float(str(os.getenv("FOTO_CARNE_MAX_JPEG_OVERSIZE_PCT", "1.15") or "1.15").strip())
+    max_jpeg_oversize_pct = max(1.0, min(1.4, max_jpeg_oversize_pct))
 
     return FotoCarneConfig(
         base_dir=base_dir,
@@ -79,6 +84,8 @@ def load_foto_carne_config() -> FotoCarneConfig:
         estado_sin_registros=estado_sin_registros,
         worker_count=worker_count,
         max_lote_dirs=max_lote_dirs,
+        min_jpeg_quality=min_jpeg_quality,
+        max_jpeg_oversize_pct=max_jpeg_oversize_pct,
     )
 
 
@@ -175,6 +182,8 @@ def _worker_foto_carne(
                 max_kb=cfg.max_kb,
                 headroom_pct=cfg.headroom_pct,
                 overwrite_existing=cfg.overwrite_existing,
+                min_jpeg_quality=cfg.min_jpeg_quality,
+                max_jpeg_oversize_pct=cfg.max_jpeg_oversize_pct,
             )
             resumen["procesados"] += 1
             if resultado.get("status") == "ok":
