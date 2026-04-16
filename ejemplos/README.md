@@ -236,7 +236,7 @@ CARNET_OCR_MAX_INTENTOS=6
 ## Instalacion
 
 ```bash
-pip install -r requirements.md
+pip install -r requirements.txt
 python -m playwright install chromium
 ```
 
@@ -298,6 +298,36 @@ Log generado por corrida:
 
 - `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/galenius_flow.log`
 - `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/events.jsonl`
+
+## Flujo Foto Carne (separado)
+
+Runner independiente:
+
+- `run_foto_carne.py`
+- `run_foto_carne.bat`
+
+Comportamiento:
+
+- Lee cola desde `BOT DOCUMENTOS` por `DNI`.
+- Busca `DNI` en hoja fuente de fotos.
+- Descarga desde `Cargar Foto` y guarda JPG en lote propio.
+- Actualiza en la hoja `ESTADO FOTO CARNÉ` y `OBSERVACION FOTO CARNÉ`.
+
+Defaults actuales:
+
+- `FOTO_CARNE_WORKERS=4`
+- `FOTO_CARNE_MAX_KB=80`
+- `FOTO_CARNE_HEADROOM_PCT=0.95`
+- `FOTO_CARNE_OVERWRITE_EXISTING=0`
+- `FOTO_CARNE_LOTES_DIR=lotes`
+- `FOTO_CARNE_LOG_DIR=logs/foto_carne`
+
+Estados usados por defecto:
+
+- `EN PROCESO W#`
+- `DESCARGADO`
+- `SIN REGISTROS`
+- `ERROR`
 
 ## Requisitos Google Cloud
 

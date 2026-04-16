@@ -1,8 +1,10 @@
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from queue import Empty, Queue
 
 from dotenv import load_dotenv
 
@@ -36,6 +38,7 @@ class FotoCarneConfig:
     estado_descargado: str
     estado_error: str
     estado_sin_registros: str
+    worker_count: int
 
 
 def load_foto_carne_config() -> FotoCarneConfig:
@@ -54,6 +57,7 @@ def load_foto_carne_config() -> FotoCarneConfig:
     estado_descargado = str(os.getenv("FOTO_CARNE_ESTADO_DESCARGADO", "DESCARGADO")).strip()
     estado_error = str(os.getenv("FOTO_CARNE_ESTADO_ERROR", "ERROR")).strip()
     estado_sin_registros = str(os.getenv("FOTO_CARNE_ESTADO_SIN_REGISTROS", "SIN REGISTROS")).strip()
+    worker_count = max(1, min(4, int(str(os.getenv("FOTO_CARNE_WORKERS", "4") or "4").strip())))
 
     return FotoCarneConfig(
         base_dir=base_dir,
@@ -70,6 +74,7 @@ def load_foto_carne_config() -> FotoCarneConfig:
         estado_descargado=estado_descargado,
         estado_error=estado_error,
         estado_sin_registros=estado_sin_registros,
+        worker_count=worker_count,
     )
 
 
@@ -117,6 +122,115 @@ def _setup_logger(logs_root: Path) -> tuple[logging.Logger, Path]:
     return logger, run_dir
 
 
+def _worker_foto_carne(
+    worker_id: int,
+    cfg: FotoCarneConfig,
+    fieldnames: list[str],
+    foto_source_map: dict[str, str],
+    lote_dir: Path,
+    tareas: Queue,
+    logger,
+) -> dict[str, int]:
+    worker_tag = f"W{worker_id}"
+    resumen = {"procesados": 0, "descargados": 0, "sin_registros": 0, "errores": 0}
+
+    while True:
+        try:
+            dni, row_number = tareas.get_nowait()
+        except Empty:
+            break
+
+        try:
+            _marcar_fila_foto_carne(
+                cfg,
+                fieldnames,
+                row_number,
+                f"{cfg.estado_en_proceso} W{worker_id}",
+                "",
+                logger,
+            )
+
+            if dni not in foto_source_map:
+                resumen["sin_registros"] += 1
+                logger.info("[FOTO CARNE][%s][%s] SIN COINCIDENCIA EN FUENTE", worker_tag, dni)
+                _marcar_fila_foto_carne(
+                    cfg,
+                    fieldnames,
+                    row_number,
+                    cfg.estado_sin_registros,
+                    f"{dni} SIN CARGAR FOTO EN FUENTE",
+                    logger,
+                )
+                continue
+
+            resultado = procesar_foto_carne_por_dni(
+                dni=dni,
+                foto_source_map=foto_source_map,
+                credentials_path=cfg.drive_credentials_json,
+                lote_dir=lote_dir,
+                max_kb=cfg.max_kb,
+                headroom_pct=cfg.headroom_pct,
+                overwrite_existing=cfg.overwrite_existing,
+            )
+            resumen["procesados"] += 1
+            if resultado.get("status") == "ok":
+                resumen["descargados"] += 1
+                logger.info("[FOTO CARNE][%s][%s] OK | %s", worker_tag, dni, resultado.get("local_path", ""))
+                _marcar_fila_foto_carne(
+                    cfg,
+                    fieldnames,
+                    row_number,
+                    cfg.estado_descargado,
+                    str(resultado.get("observation", "DESCARGADO SIN OBSERVACIONES")),
+                    logger,
+                )
+            elif resultado.get("status") == "sin_registros":
+                resumen["sin_registros"] += 1
+                logger.info("[FOTO CARNE][%s][%s] SIN REGISTROS | %s", worker_tag, dni, resultado.get("observation", ""))
+                _marcar_fila_foto_carne(
+                    cfg,
+                    fieldnames,
+                    row_number,
+                    cfg.estado_sin_registros,
+                    str(resultado.get("observation", "")),
+                    logger,
+                )
+            else:
+                resumen["errores"] += 1
+                logger.warning(
+                    "[FOTO CARNE][%s][%s] ERROR | %s | %s",
+                    worker_tag,
+                    dni,
+                    resultado.get("observation", ""),
+                    resultado.get("detail", ""),
+                )
+                _marcar_fila_foto_carne(
+                    cfg,
+                    fieldnames,
+                    row_number,
+                    cfg.estado_error,
+                    str(resultado.get("observation", "ERROR DE TRATAMIENTO")),
+                    logger,
+                )
+        except Exception as exc:
+            resumen["errores"] += 1
+            logger.exception("[FOTO CARNE][%s][%s] Excepcion procesando foto: %s", worker_tag, dni, exc)
+            try:
+                _marcar_fila_foto_carne(
+                    cfg,
+                    fieldnames,
+                    row_number,
+                    cfg.estado_error,
+                    f"{dni} ERROR: {exc}",
+                    logger,
+                )
+            except Exception:
+                logger.exception("[FOTO CARNE][%s][%s] No se pudo actualizar estado de error en hoja", worker_tag, dni)
+
+    logger.info("[FOTO CARNE][%s] Worker finalizado | resumen=%s", worker_tag, resumen)
+    return resumen
+
+
 def main() -> int:
     cfg = load_foto_carne_config()
     logger, run_dir = _setup_logger(cfg.logs_root)
@@ -152,95 +266,47 @@ def main() -> int:
 
     logger.info("[FOTO CARNE] Cola cargada | filas=%s | filas_validas=%s", len(queue_rows), len(queue_items))
 
+    worker_count = min(cfg.worker_count, len(queue_items)) if queue_items else 0
+    tareas: Queue = Queue()
+    for item in queue_items:
+        tareas.put(item)
+
+    logger.info(
+        "[FOTO CARNE] Procesamiento multihilo activado | workers=%s | filas_validas=%s",
+        worker_count,
+        len(queue_items),
+    )
+
     procesados = 0
     descargados = 0
     sin_registros = 0
     errores = 0
 
-    for dni, row_number in queue_items:
-        try:
-            _marcar_fila_foto_carne(
-                cfg,
-                fieldnames,
-                row_number,
-                f"{cfg.estado_en_proceso} FOTO CARNÉ",
-                "",
-                logger,
-            )
-
-            if dni not in foto_source_map:
-                sin_registros += 1
-                logger.info("[FOTO CARNE][%s] SIN COINCIDENCIA EN FUENTE", dni)
-                _marcar_fila_foto_carne(
+    if worker_count > 0:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(
+                    _worker_foto_carne,
+                    worker_id,
                     cfg,
                     fieldnames,
-                    row_number,
-                    cfg.estado_sin_registros,
-                    f"{dni} SIN CARGAR FOTO EN FUENTE",
+                    foto_source_map,
+                    lote_dir,
+                    tareas,
                     logger,
                 )
-                continue
-
-            resultado = procesar_foto_carne_por_dni(
-                dni=dni,
-                foto_source_map=foto_source_map,
-                credentials_path=cfg.drive_credentials_json,
-                lote_dir=lote_dir,
-                max_kb=cfg.max_kb,
-                headroom_pct=cfg.headroom_pct,
-                overwrite_existing=cfg.overwrite_existing,
-            )
-            procesados += 1
-            if resultado.get("status") == "ok":
-                descargados += 1
-                logger.info("[FOTO CARNE][%s] OK | %s", dni, resultado.get("local_path", ""))
-                _marcar_fila_foto_carne(
-                    cfg,
-                    fieldnames,
-                    row_number,
-                    cfg.estado_descargado,
-                    str(resultado.get("observation", "DESCARGADO SIN OBSERVACIONES")),
-                    logger,
-                )
-            elif resultado.get("status") == "sin_registros":
-                sin_registros += 1
-                logger.info("[FOTO CARNE][%s] SIN REGISTROS | %s", dni, resultado.get("observation", ""))
-                _marcar_fila_foto_carne(
-                    cfg,
-                    fieldnames,
-                    row_number,
-                    cfg.estado_sin_registros,
-                    str(resultado.get("observation", "")),
-                    logger,
-                )
-            else:
-                errores += 1
-                logger.warning("[FOTO CARNE][%s] ERROR | %s | %s", dni, resultado.get("observation", ""), resultado.get("detail", ""))
-                _marcar_fila_foto_carne(
-                    cfg,
-                    fieldnames,
-                    row_number,
-                    cfg.estado_error,
-                    str(resultado.get("observation", "ERROR DE TRATAMIENTO")),
-                    logger,
-                )
-        except Exception as exc:
-            errores += 1
-            logger.exception("[FOTO CARNE][%s] Excepcion procesando foto: %s", dni, exc)
-            try:
-                _marcar_fila_foto_carne(
-                    cfg,
-                    fieldnames,
-                    row_number,
-                    cfg.estado_error,
-                    f"{dni} ERROR: {exc}",
-                    logger,
-                )
-            except Exception:
-                logger.exception("[FOTO CARNE][%s] No se pudo actualizar estado de error en hoja", dni)
+                for worker_id in range(1, worker_count + 1)
+            ]
+            for future in as_completed(futures):
+                result = future.result()
+                procesados += result.get("procesados", 0)
+                descargados += result.get("descargados", 0)
+                sin_registros += result.get("sin_registros", 0)
+                errores += result.get("errores", 0)
 
     logger.info(
-        "[FOTO CARNE] Flujo completado | procesados=%s | descargados=%s | sin_registros=%s | errores=%s | lote=%s",
+        "[FOTO CARNE] Flujo completado | workers=%s | procesados=%s | descargados=%s | sin_registros=%s | errores=%s | lote=%s",
+        worker_count,
         procesados,
         descargados,
         sin_registros,

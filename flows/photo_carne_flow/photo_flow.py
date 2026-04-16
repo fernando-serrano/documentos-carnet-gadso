@@ -5,7 +5,7 @@ import threading
 import unicodedata
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from .sheets import read_google_sheet_rows
 
@@ -109,20 +109,49 @@ def _jpeg_menor_a_limite(image: Image.Image, target_bytes: int) -> tuple[bytes, 
     if target_bytes <= 0:
         raise RuntimeError("Limite de bytes invalido para foto")
 
-    img = image.convert("RGB")
+    # Corrige orientacion EXIF antes de comprimir para evitar resultados inconsistentes.
+    img = ImageOps.exif_transpose(image).convert("RGB")
     base_w, base_h = img.size
 
-    for scale in (1.0, 0.92, 0.85, 0.78, 0.7, 0.62, 0.55):
+    for scale in (1.0, 0.92, 0.85, 0.78, 0.7, 0.62, 0.55, 0.48, 0.42, 0.36):
         w = max(240, int(base_w * scale))
         h = max(320, int(base_h * scale))
         resized = img.resize((w, h), Image.LANCZOS)
 
-        for quality in (88, 82, 76, 70, 64, 58, 52, 46, 40, 34, 28):
+        for quality in (88, 82, 76, 70, 64, 58, 52, 46, 40, 34, 28, 24):
             buffer = io.BytesIO()
-            resized.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=True)
+            resized.save(
+                buffer,
+                format="JPEG",
+                quality=quality,
+                optimize=True,
+                progressive=True,
+                subsampling=2,
+            )
             data = buffer.getvalue()
             if len(data) <= target_bytes:
                 detalle = f"jpeg_ok size={len(data)} quality={quality} scale={scale:.2f}"
+                return data, detalle
+
+    # Segunda fase: prioriza cumplir limite en casos extremos.
+    for scale in (0.32, 0.28, 0.24):
+        w = max(160, int(base_w * scale))
+        h = max(200, int(base_h * scale))
+        resized = img.resize((w, h), Image.LANCZOS)
+
+        for quality in (22, 20, 18, 16):
+            buffer = io.BytesIO()
+            resized.save(
+                buffer,
+                format="JPEG",
+                quality=quality,
+                optimize=True,
+                progressive=False,
+                subsampling=2,
+            )
+            data = buffer.getvalue()
+            if len(data) <= target_bytes:
+                detalle = f"jpeg_fallback_ok size={len(data)} quality={quality} scale={scale:.2f}"
                 return data, detalle
 
     raise RuntimeError("No se pudo reducir foto por debajo del limite requerido")

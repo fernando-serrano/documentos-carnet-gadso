@@ -126,3 +126,53 @@ Variables principales para Foto Carne:
 - `FOTO_CARNE_QUEUE_SHEET_URL` o `GALENIUS_QUEUE_SHEET_URL` para leer la cola desde BOT DOCUMENTOS.
 - `FOTO_CARNE_SOURCE_SHEET_URL` para la hoja base donde vive `Cargar Foto`.
 - `FOTO_CARNE_DRIVE_CREDENTIALS_JSON` o `DRIVE_CREDENTIALS_JSON` para Google Drive/Sheets.
+
+## Flujo Foto Carne
+
+El flujo Foto Carne se ejecuta por separado, consume la misma cola `BOT DOCUMENTOS` y actualiza en la hoja:
+
+- `ESTADO FOTO CARNÉ`
+- `OBSERVACION FOTO CARNÉ`
+- `RESPONSABLE`
+- `FECHA TRAMITE`
+
+Transiciones de estado durante el proceso:
+
+- `EN PROCESO W#` mientras un worker atiende la fila.
+- `DESCARGADO` cuando la foto se guarda correctamente.
+- `SIN REGISTROS` cuando no hay foto asociada en la hoja fuente.
+- `ERROR` ante fallas de descarga/compresión/procesamiento.
+
+Salida local de Foto Carne:
+
+- `lotes/lote-foto-carne-DD-MM-YYYY-HH-MM-SS/<dni>/foto_carne_<dni>.jpg`
+
+### Defaults del flujo Foto Carne
+
+- `FOTO_CARNE_WORKERS=4` (por defecto, maximo actual 4)
+- `FOTO_CARNE_MAX_KB=80`
+- `FOTO_CARNE_HEADROOM_PCT=0.95`
+- `FOTO_CARNE_OVERWRITE_EXISTING=0`
+- `FOTO_CARNE_LOTES_DIR=lotes`
+- `FOTO_CARNE_LOG_DIR=logs/foto_carne`
+
+Nota de compresion:
+
+- La conversion y compresion usan Pillow para intentar mantener formato JPG y cumplir el umbral configurado.
+
+### Variables recomendadas de Foto Carne
+
+- `FOTO_CARNE_QUEUE_SHEET_URL` (si no se define, usa `GALENIUS_QUEUE_SHEET_URL`)
+- `FOTO_CARNE_SOURCE_SHEET_URL`
+- `FOTO_CARNE_DRIVE_CREDENTIALS_JSON` (si no se define, usa `DRIVE_CREDENTIALS_JSON`)
+- `FOTO_CARNE_RESPONSABLE_DEFAULT`
+- `FOTO_CARNE_ESTADO_EN_PROCESO`
+- `FOTO_CARNE_ESTADO_DESCARGADO`
+- `FOTO_CARNE_ESTADO_ERROR`
+- `FOTO_CARNE_ESTADO_SIN_REGISTROS`
+
+### Ejecucion de Foto Carne
+
+```bat
+run_foto_carne.bat
+```
