@@ -192,67 +192,71 @@ def _es_numero_corto(texto: str) -> bool:
 
 
 def _extraer_fecha_tabla_inferior(page, fitz_mod) -> tuple[dict[str, object] | None, str]:
-    anchors = page.search_for("FECHA DE LA DECLARACION")
-    if not anchors:
-        return None, "date_anchor_not_found"
+    anchors = []
+    for label in ("FECHA DE LA DECLARACION", "FECHA DE LA DECLARACIÓN", "FECHA DE LA DECLARACION "):
+        anchors = page.search_for(label)
+        if anchors:
+            break
 
-    anchor = anchors[0]
-    area = fitz_mod.Rect(anchor.x0 - 40, anchor.y0 - 10, anchor.x1 + 180, anchor.y1 + 110)
+    if anchors:
+        anchor = anchors[0]
+        area = fitz_mod.Rect(anchor.x0 - 40, anchor.y0 - 10, anchor.x1 + 180, anchor.y1 + 110)
 
-    words = page.get_text("words") or []
-    numericos = []
-    for word in words:
-        x0, y0, x1, y1, texto = word[:5]
-        if not _es_numero_corto(texto):
-            continue
-        cx = (float(x0) + float(x1)) / 2.0
-        cy = (float(y0) + float(y1)) / 2.0
-        if not area.contains(fitz_mod.Point(cx, cy)):
-            continue
-        numericos.append({
-            "rect": fitz_mod.Rect(float(x0), float(y0), float(x1), float(y1)),
-            "text": str(texto).strip(),
-        })
+        words = page.get_text("words") or []
+        numericos = []
+        for word in words:
+            x0, y0, x1, y1, texto = word[:5]
+            if not _es_numero_corto(texto):
+                continue
+            cx = (float(x0) + float(x1)) / 2.0
+            cy = (float(y0) + float(y1)) / 2.0
+            if not area.contains(fitz_mod.Point(cx, cy)):
+                continue
+            numericos.append({
+                "rect": fitz_mod.Rect(float(x0), float(y0), float(x1), float(y1)),
+                "text": str(texto).strip(),
+            })
 
-    if len(numericos) >= 3:
-        filas: dict[float, list[dict[str, object]]] = {}
-        for item in numericos:
-            y_key = round(float(item["rect"].y0) / 3.0) * 3.0
-            filas.setdefault(y_key, []).append(item)
+        if len(numericos) >= 3:
+            filas: dict[float, list[dict[str, object]]] = {}
+            for item in numericos:
+                y_key = round(float(item["rect"].y0) / 3.0) * 3.0
+                filas.setdefault(y_key, []).append(item)
 
-        fila_objetivo = None
-        for y_key, fila in sorted(filas.items(), key=lambda kv: kv[0], reverse=True):
-            if len(fila) >= 3:
-                fila_objetivo = sorted(fila, key=lambda it: float(it["rect"].x0))
-                break
+            fila_objetivo = None
+            for y_key, fila in sorted(filas.items(), key=lambda kv: kv[0], reverse=True):
+                if len(fila) >= 3:
+                    fila_objetivo = sorted(fila, key=lambda it: float(it["rect"].x0))
+                    break
 
-        if fila_objetivo:
-            dd_item = fila_objetivo[0]
-            mm_item = fila_objetivo[1]
-            yyyy_item = fila_objetivo[2]
+            if fila_objetivo:
+                dd_item = fila_objetivo[0]
+                mm_item = fila_objetivo[1]
+                yyyy_item = fila_objetivo[2]
 
-            try:
-                old_day = int(str(dd_item["text"]))
-            except Exception:
-                old_day = None
+                try:
+                    old_day = int(str(dd_item["text"]))
+                except Exception:
+                    old_day = None
 
-            try:
-                old_month = int(str(mm_item["text"]))
-            except Exception:
-                old_month = None
+                try:
+                    old_month = int(str(mm_item["text"]))
+                except Exception:
+                    old_month = None
 
-            try:
-                old_year = int(str(yyyy_item["text"]))
-            except Exception:
-                old_year = None
+                try:
+                    old_year = int(str(yyyy_item["text"]))
+                except Exception:
+                    old_year = None
 
-            return {
-                "dd_rect": dd_item["rect"],
-                "mm_rect": mm_item["rect"],
-                "old_day": old_day,
-                "old_month": old_month,
-                "old_year": old_year,
-            }, "date_row_found"
+                return {
+                    "dd_rect": dd_item["rect"],
+                    "mm_rect": mm_item["rect"],
+                    "aaaa_rect": yyyy_item["rect"],
+                    "old_day": old_day,
+                    "old_month": old_month,
+                    "old_year": old_year,
+                }, "date_row_found"
 
     # Fallback cuando la etiqueta no es detectable: buscamos la fila numerica DD/MM/AAAA
     # SOLO en la tabla FECHA DE LA DECLARACIÓN (últimas coordenadas: y > 90% de altura)
@@ -316,27 +320,64 @@ def _extraer_fecha_tabla_inferior(page, fitz_mod) -> tuple[dict[str, object] | N
     return {
         "dd_rect": dd_item["rect"],
         "mm_rect": mm_item["rect"],
+        "aaaa_rect": yyyy_item["rect"],
         "old_day": old_day,
         "old_month": old_month,
         "old_year": old_year,
     }, "date_row_found_fallback"
 
 
-def _tapar_y_escribir(page, rect, value: str) -> None:
-    # Sin fondo blanco - solo sobrescribir el número
-    # Calcular tamaño de fuente dinámicamente basado en el alto de la celda
-    # Aproximadamente 70% del alto de la celda para que quepa bien
-    font_size = max(6, min(11, rect.height * 0.65))
+def _tapar_y_escribir(page, rect, value: str, fitz_mod) -> None:
+    """
+    Tapa correctamente el número antiguo y reinserta el nuevo con la misma fuente/tamaño.
+    Implementa la lógica robusta del script firma.py adaptada para lotes.
+    """
+    # Extraer fuente y tamaño original del contexto del PDF
+    fontname_original = "Helvetica"
+    fontsize_original = 11.0
     
-    # Escribir directamente sin fondo blanco
-    page.insert_textbox(
-        rect,
+    try:
+        text_dict = page.get_text("dict")
+        for block in text_dict.get("blocks", []):
+            if "lines" not in block:
+                continue
+            for line in block["lines"]:
+                for span in line["spans"]:
+                    span_rect = fitz_mod.Rect(span["bbox"])
+                    if span_rect.intersects(rect):
+                        fontname_original = span.get("font", fontname_original)
+                        fontsize_original = span.get("size", fontsize_original)
+                        break
+    except Exception:
+        pass
+    
+    # Aplicar reducción ligera para que quepa perfectamente
+    fontsize_final = fontsize_original * 0.92
+    
+    # Normalizar fuente: usa Helvetica-Bold si está disponible
+    if "bold" in fontname_original.lower() or "b" in fontname_original.lower():
+        fontname_final = "Helvetica-Bold"
+    else:
+        fontname_final = "Helvetica"
+    
+    # Tapar con rectángulo blanco
+    shape = page.new_shape()
+    shape.draw_rect(rect)
+    shape.finish(fill=(1, 1, 1), color=(1, 1, 1))
+    shape.commit()
+    
+    # Calcular posición centrada
+    text_width = fitz_mod.get_text_length(value, fontname=fontname_final, fontsize=fontsize_final)
+    x_centrado = rect.x0 + (rect.width - text_width) / 2.0
+    y_centrado = rect.y0 + (rect.height / 2.0) + (fontsize_final * 0.35)
+    
+    # Insertar el nuevo número
+    page.insert_text(
+        fitz_mod.Point(x_centrado, y_centrado),
         value,
-        fontname="helv",
-        fontsize=font_size,
-        align=1,  # CENTER
-        color=(0, 0, 0),
-        overlay=True,
+        fontsize=fontsize_final,
+        fontname=fontname_final,
+        color=(0, 0, 0)
     )
 
 
@@ -404,53 +445,163 @@ def _extraer_celdas_fecha_por_geometria(page) -> tuple[dict[str, object] | None,
     }, "date_geom_found"
 
 
-def _actualizar_fecha_declaracion(pdf_bytes: bytes) -> tuple[bytes, str, bool]:
+def _actualizar_fecha_declaracion_archivo(pdf_path: Path) -> tuple[str, bool]:
+    """
+    Edita la fecha del PDF guardado en DISCO - COPIA EXACTA de la lógica de firma.py.
+    Modifica el archivo IN-PLACE con toda la robustez de firma.py.
+    Retorna (detalle, éxito).
+    """
     try:
         fitz_mod = importlib.import_module("fitz")
     except Exception as exc:
-        return pdf_bytes, f"date_edit_no_pymupdf={exc}", False
+        return f"date_edit_disk_no_pymupdf={exc}", False
+
+    if not pdf_path.exists():
+        return "date_edit_disk_file_not_found", False
 
     try:
-        doc = fitz_mod.open(stream=pdf_bytes, filetype="pdf")
+        doc = fitz_mod.open(pdf_path)
     except Exception as exc:
-        return pdf_bytes, f"date_edit_open_error={exc}", False
+        return f"date_edit_disk_open_error={exc}", False
 
     try:
+        page = doc[0]
+
+        # PASO 1: Extraer la fecha DESDE LA TABLA INFERIOR IZQUIERDA.
+        # Esto evita tomar la fecha de aprobacion u otras fechas del documento.
+        info, detail = _extraer_fecha_tabla_inferior(page, fitz_mod)
+        if not info:
+            return f"date_edit_disk_table_not_found={detail}", False
+
+        old_day = info.get("old_day")
+        old_month = info.get("old_month")
+        old_year = info.get("old_year")
+        if not isinstance(old_day, int) or not isinstance(old_month, int) or not isinstance(old_year, int):
+            return "date_edit_disk_invalid_old_values", False
+
+        old_dd_str = f"{old_day:02d}"
+        old_mm_str = f"{old_month:02d}"
+        old_aaaa_str = f"{old_year}"
+
+        # PASO 2: Zona inferior izquierda (tabla de fecha)
+        def es_zona_fecha(rect):
+            return rect.y0 > page.rect.height * 0.78 and rect.x0 < page.rect.width * 0.55
+
+        rect_dd = info.get("dd_rect")
+        rect_mm = info.get("mm_rect")
+        rect_aaaa = info.get("aaaa_rect")
+
+        if rect_aaaa is None:
+            rect_aaaa = next((r for r in page.search_for(old_aaaa_str)
+                              if r.y0 > page.rect.height * 0.78 and r.x0 > page.rect.width * 0.40), None)
+        
+        fontname_aaaa = "Helvetica"
+        fontsize_aaaa = 7.5
+        
+        # Extraer fuente y tamaño REALES del AAAA - COPIA LITERAL de firma.py
+        if rect_aaaa:
+            text_dict = page.get_text("dict")
+            for block in text_dict.get("blocks", []):
+                if "lines" not in block:
+                    continue
+                for line in block["lines"]:
+                    for span in line["spans"]:
+                        if old_aaaa_str in span["text"].strip():
+                            fontname_aaaa = span.get("font", "Helvetica")
+                            fontsize_aaaa = span.get("size", 11.0)
+                            break
+        
+        # Reducimos ligeramente para que quede perfecto - COPIA LITERAL de firma.py
+        fontsize_final = fontsize_aaaa * 0.92
+        
+        # Aplicar negrita - COPIA LITERAL de firma.py (se usa True por defecto en lotes)
+        USAR_NEGRITA = True
+        if USAR_NEGRITA:
+            fontname_final = "Helvetica-Bold"
+        else:
+            fontname_final = fontname_aaaa.replace("-Bold", "").replace("Bold", "")
+        
+        # Fallback robusto por si algun rectangulo no se detecto.
+        if not rect_dd or not rect_mm or not rect_aaaa:
+            text_dict = page.get_text("dict")
+            for block in text_dict.get("blocks", []):
+                if "lines" not in block:
+                    continue
+                for line in block["lines"]:
+                    for span in line["spans"]:
+                        texto = span["text"].strip()
+                        if re.match(r'^\d{1,2}$', texto) or re.match(r'^\d{4}$', texto):
+                            r = fitz_mod.Rect(span["bbox"])
+                            if es_zona_fecha(r):
+                                if not rect_dd and len(texto) == 2 and int(texto) <= 31:
+                                    rect_dd = r
+                                elif not rect_mm and len(texto) == 2 and int(texto) <= 12:
+                                    rect_mm = r
+                                elif not rect_aaaa and len(texto) == 4:
+                                    rect_aaaa = r
+        
+        if not rect_dd or not rect_mm or not rect_aaaa:
+            return "date_edit_disk_rects_not_found", False
+        
+        # PASO 3: Calcular nueva fecha con la regla requerida.
+        # - MM: si mes viejo < mes actual, actualizar; en caso contrario, conservar.
+        # - DD: si dia > dia actual, random 1..dia_actual; si no, conservar.
+        # - AAAA: siempre anio actual.
         now = datetime.now()
         target_month = now.month
         target_day_limit = max(1, now.day)
 
-        for page in doc:
-            info, detail = _extraer_fecha_tabla_inferior(page, fitz_mod)
-            if not info:
-                info, detail = _extraer_celdas_fecha_por_geometria(page)
-            if not info:
-                continue
+        if old_month < target_month:
+            new_month = target_month
+            month_rule = "month_updated"
+        else:
+            new_month = old_month
+            month_rule = "month_kept"
+        
+        if isinstance(old_day, int) and 1 <= old_day <= target_day_limit:
+            new_day = old_day
+            day_rule = "day_kept"
+        else:
+            new_day = random.randint(1, target_day_limit)
+            day_rule = "day_randomized"
 
-            old_day = info.get("old_day")
-            if isinstance(old_day, int) and 1 <= old_day <= target_day_limit:
-                new_day = old_day
-                day_rule = "day_kept"
-            else:
-                new_day = random.randint(1, target_day_limit)
-                day_rule = "day_randomized"
-
-            new_day_str = f"{int(new_day):02d}"
-            new_month_str = f"{int(target_month):02d}"
-
-            _tapar_y_escribir(page, info["dd_rect"], new_day_str)
-            _tapar_y_escribir(page, info["mm_rect"], new_month_str)
-
-            out = io.BytesIO()
-            doc.save(out, deflate=True, garbage=3, clean=True)
-            return out.getvalue(), (
-                f"date_edit_ok old_day={info.get('old_day')} old_month={info.get('old_month')} "
-                f"new_day={new_day_str} new_month={new_month_str} {day_rule}"
-            ), True
-
-        return pdf_bytes, "date_edit_table_not_found", False
+        new_day_str = f"{int(new_day):02d}"
+        new_month_str = f"{int(new_month):02d}"
+        new_aaaa_str = f"{now.year}"
+        
+        # PASO 4: Cubrir con blanco los 3 campos - COPIA LITERAL de firma.py
+        for rect in [rect_dd, rect_mm, rect_aaaa]:
+            shape = page.new_shape()
+            shape.draw_rect(rect)
+            shape.finish(fill=(1, 1, 1), color=(1, 1, 1))
+            shape.commit()
+        
+        # PASO 5: Insertar los 3 campos con la misma fuente, tamaño y negrita - COPIA LITERAL de firma.py
+        for rect, texto in [(rect_dd, new_day_str), (rect_mm, new_month_str), (rect_aaaa, new_aaaa_str)]:
+            text_width = fitz_mod.get_text_length(texto, fontname=fontname_final, fontsize=fontsize_final)
+            x_centrado = rect.x0 + (rect.width - text_width) / 2
+            y_centrado = rect.y0 + (rect.height / 2) + (fontsize_final * 0.35)
+            
+            page.insert_text(
+                fitz_mod.Point(x_centrado, y_centrado),
+                texto,
+                fontsize=fontsize_final,
+                fontname=fontname_final,
+                color=(0, 0, 0)
+            )
+        
+        # PASO 6: Guardar evitando escribir sobre el mismo archivo abierto.
+        # En PyMuPDF, guardar directo al mismo path puede fallar y dejar la edición sin efecto.
+        edited_bytes = doc.tobytes(garbage=4, deflate=1, clean=1)
+        pdf_path.write_bytes(edited_bytes)
+        
+        return (
+            f"date_edit_disk_ok old={old_dd_str}/{old_mm_str}/{old_aaaa_str} "
+            f"new={new_day_str}/{new_month_str}/{new_aaaa_str} {month_rule} {day_rule}"
+        ), True
+        
     except Exception as exc:
-        return pdf_bytes, f"date_edit_error={exc}", False
+        return f"date_edit_disk_error={exc}", False
     finally:
         doc.close()
 
@@ -572,27 +723,36 @@ def procesar_dj_fut_por_dni(
             "detail": f"mime={mime}",
         }
 
-    edited_pdf, date_detail, date_ok = _actualizar_fecha_declaracion(content)
+    # PASO 1: GUARDAR PDF DESCARGADO PRIMERO (sin editar fecha aún)
+    local_path = _guardar_pdf_local(lote_dir, dni_digits, content, overwrite_existing)
+
+    # PASO 2: EDITAR FECHA SOBRE EL ARCHIVO GUARDADO EN DISCO (como firma.py - más robusto)
+    date_detail, date_ok = _actualizar_fecha_declaracion_archivo(local_path)
     if not date_ok and date_edit_required:
         return {
             "status": "error",
             "observation": f"{dni_digits} FECHA DECLARACION NO EDITABLE",
             "detail": date_detail,
         }
+    date_warning = ""
     if not date_ok:
-        edited_pdf = content
+        date_warning = f" | FECHA NO EDITADA ({date_detail})"
 
+    # PASO 3: LEER EL ARCHIVO EDITADO Y COMPRIMIR SI ES NECESARIO
+    edited_pdf = local_path.read_bytes()
     target_bytes = max(1, int(max_kb * 1024 * headroom_pct))
-    out_pdf, detail, within_limit = _pdf_menor_a_limite(edited_pdf, target_bytes, allow_lossy=allow_lossy)
+    out_pdf, compress_detail, within_limit = _pdf_menor_a_limite(edited_pdf, target_bytes, allow_lossy=allow_lossy)
+
+    # Si se comprimió, actualizar el archivo guardado
+    if out_pdf != edited_pdf:
+        local_path.write_bytes(out_pdf)
 
     if strict_size_limit and not within_limit:
         return {
             "status": "error",
             "observation": f"{dni_digits} DJ FUT NO COMPRIMIBLE < {max_kb}KB",
-            "detail": detail,
+            "detail": compress_detail,
         }
-
-    local_path = _guardar_pdf_local(lote_dir, dni_digits, out_pdf, overwrite_existing)
 
     if within_limit:
         observation = "DESCARGADO SIN OBSERVACIONES"
@@ -600,9 +760,12 @@ def procesar_dj_fut_por_dni(
         size_kb = len(out_pdf) / 1024.0
         observation = f"DESCARGADO > {max_kb}KB ({size_kb:.1f}KB)"
 
+    if date_warning:
+        observation = f"{observation}{date_warning}"
+
     return {
         "status": "ok",
         "observation": observation,
-        "detail": f"mime={mime} {date_detail} {detail}",
+        "detail": f"mime={mime} {date_detail} {compress_detail}",
         "local_path": str(local_path),
     }

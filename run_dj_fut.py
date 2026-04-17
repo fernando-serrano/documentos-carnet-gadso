@@ -66,7 +66,7 @@ def load_dj_fut_config() -> DjFutConfig:
     max_lote_dirs = max(1, int(str(os.getenv("DJ_FUT_MAX_LOTE_DIRS", os.getenv("GALENIUS_MAX_LOTE_DIRS", "10")) or "10").strip()))
     strict_size_limit = _as_bool(os.getenv("DJ_FUT_STRICT_SIZE_LIMIT", "0"), default=False)
     allow_lossy = _as_bool(os.getenv("DJ_FUT_ALLOW_LOSSY", "0"), default=False)
-    date_edit_required = _as_bool(os.getenv("DJ_FUT_DATE_EDIT_REQUIRED", "0"), default=False)
+    date_edit_required = _as_bool(os.getenv("DJ_FUT_DATE_EDIT_REQUIRED", "1"), default=True)
 
     return DjFutConfig(
         base_dir=base_dir,
