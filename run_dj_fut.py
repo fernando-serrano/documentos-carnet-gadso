@@ -118,6 +118,8 @@ def _setup_logger(logs_root: Path) -> tuple[logging.Logger, Path]:
     logs_root.mkdir(parents=True, exist_ok=True)
     run_dir = logs_root / f"dj_fut_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    prune_old_lote_dirs_global(logs_root, 10)
+
     logger = logging.getLogger(f"dj_fut_{run_dir.name}")
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -133,6 +135,17 @@ def _setup_logger(logs_root: Path) -> tuple[logging.Logger, Path]:
     stream.setFormatter(formatter)
     logger.addHandler(stream)
     return logger, run_dir
+
+
+def _resolver_lote_dir_compartido(base_dir: Path) -> Path | None:
+    raw = str(os.getenv("GLOBAL_LOTE_DIR", "")).strip()
+    if not raw:
+        return None
+
+    lote_dir = Path(raw)
+    if not lote_dir.is_absolute():
+        lote_dir = base_dir / lote_dir
+    return lote_dir
 
 
 def _worker_dj_fut(
@@ -263,8 +276,14 @@ def main() -> int:
         return 2
 
     cfg.lotes_root.mkdir(parents=True, exist_ok=True)
-    lote_dir = cfg.lotes_root / f"lote-dj-fut-{datetime.now().strftime('%d-%m-%Y-%H-%M-%S')}"
-    lote_dir.mkdir(parents=True, exist_ok=True)
+    lote_dir_compartido = _resolver_lote_dir_compartido(cfg.base_dir)
+    if lote_dir_compartido is not None:
+        lote_dir = lote_dir_compartido
+        lote_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("[DJ FUT] Usando lote compartido | lote=%s", lote_dir)
+    else:
+        lote_dir = cfg.lotes_root / f"lote-dj-fut-{datetime.now().strftime('%d-%m-%Y-%H-%M-%S')}"
+        lote_dir.mkdir(parents=True, exist_ok=True)
     prune_old_lote_dirs_global(cfg.lotes_root, cfg.max_lote_dirs)
 
     logger.info("[DJ FUT] Cola source=%s | fuente=%s", cfg.queue_sheet_url, cfg.source_sheet_url)

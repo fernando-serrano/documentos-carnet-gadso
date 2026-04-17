@@ -44,16 +44,22 @@ El responsable se establece por defecto como `BOT DOCUMENTOS SUCAMEC` y la fecha
 
 ## Salida Local
 
-Cada ejecucion crea su propio directorio de lote en la raiz del proyecto:
+Al ejecutar `run.bat` (sin argumentos o con `all`) se crea un unico lote compartido en la raiz del proyecto:
 
 - `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/certificado_medico_<dni>.pdf`
+- `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/foto_carne_<dni>.jpg`
+- `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/djfut_<dni>.pdf`
+- `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/firma_digital_<dni>.png`
+
+De esta forma, cada `DNI` concentra los 4 documentos dentro del mismo expediente.
 
 Si el PDF supera el umbral configurado, el flujo intenta optimizarlo antes de guardarlo.
 
 ## Estructura Relevante
 
 - `run_galenius.py`: entrypoint unico del flujo.
-- `run_galenius_login.bat`: launcher de Windows para ejecutar el flujo unico.
+- `run.bat`: launcher unico en raiz para ejecutar cualquier flujo.
+- `scripts/bat/run_galenius_login.bat`: launcher interno de Galenius.
 - `flows/galenius_flow/config.py`: configuracion por variables de entorno.
 - `flows/galenius_flow/main_flow.py`: orquestacion del flujo actual.
 - `flows/galenius_flow/selectors.py`: selectores de UI y candidatos de scraping.
@@ -77,9 +83,18 @@ Opcionales recomendadas:
 - `GALENIUS_OVERWRITE_EXISTING`
 - `GALENIUS_LOG_DIR`
 
-## Retencion De Auditoria
+## Retencion De Logs
 
-La carpeta de auditoria conserva como maximo 10 corridas historicas por defecto. Ese limite puede ajustarse con `GALENIUS_AUDIT_MAX_RUN_DIRS`.
+Cada subcarpeta de `logs` conserva como maximo 10 corridas historicas:
+
+- `logs/dj_fut`
+- `logs/foto_carne`
+- `logs/firma_digital`
+- `logs/galenius`
+
+Cuando se registra una corrida nueva y se supera el tope, se elimina solo la carpeta mas antigua.
+
+En Galenius, `GALENIUS_AUDIT_MAX_RUN_DIRS` solo puede reducir el tope, nunca aumentarlo por encima de 10.
 
 ## Retencion De Lotes
 
@@ -101,7 +116,19 @@ El peso maximo del PDF usa un margen de seguridad por debajo del umbral configur
 ## Ejecucion
 
 ```bat
-run_galenius_login.bat
+run.bat
+```
+
+Tambien puedes usar:
+
+```bat
+run.bat all
+```
+
+Modo individual (si necesitas solo un flujo):
+
+```bat
+run.bat galenius
 ```
 
 Por defecto el navegador corre en modo invisible (`GALENIUS_HEADLESS=1`) para evitar ventanas abiertas durante el procesamiento. Si necesitas depurar visualmente, puedes cambiarlo a `0` de forma temporal.
@@ -112,12 +139,12 @@ El flujo procesa por defecto con 4 workers en paralelo. Puedes ajustarlo con `GA
 
 Por cada corrida se generan archivos en:
 
-- `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/galenius_flow.log`
-- `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/events.jsonl`
-- `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/workers/worker_1/worker_1.log`
-- `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/workers/worker_2/worker_2.log`
-- `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/workers/worker_3/worker_3.log`
-- `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/workers/worker_4/worker_4.log`
+- `logs/galenius/galenius_flow_YYYYMMDD_HHMMSS/galenius_flow.log`
+- `logs/galenius/galenius_flow_YYYYMMDD_HHMMSS/events.jsonl`
+- `logs/galenius/galenius_flow_YYYYMMDD_HHMMSS/workers/worker_1/worker_1.log`
+- `logs/galenius/galenius_flow_YYYYMMDD_HHMMSS/workers/worker_2/worker_2.log`
+- `logs/galenius/galenius_flow_YYYYMMDD_HHMMSS/workers/worker_3/worker_3.log`
+- `logs/galenius/galenius_flow_YYYYMMDD_HHMMSS/workers/worker_4/worker_4.log`
 
 Durante el procesamiento, el estado se registra como `EN PROCESO W#` para identificar qué worker está atendiendo cada fila.
 
@@ -128,12 +155,16 @@ Cualquier logica del otro flujo (SUCAMEC) se gestiona en otro script/chat y no f
 
 El tratamiento de Foto Carne fue desacoplado y se mantiene en una carpeta separada para evitar acoplamiento con este flujo.
 
-Su lógica es independiente: toma la cola desde `BOT DOCUMENTOS` por `DNI`, busca ese `DNI` en la hoja base de fotos y, si encuentra coincidencia, descarga la URL de `Cargar Foto` para guardarla dentro de su lote propio.
+Su lógica es independiente: toma la cola desde `BOT DOCUMENTOS` por `DNI`, busca ese `DNI` en la hoja base de fotos y, si encuentra coincidencia, descarga la URL de `Cargar Foto` para guardarla en el expediente del `DNI` dentro del lote compartido.
 
-Para ejecutarlo de forma independiente existe un runner separado en la raiz:
+Para ejecutarlo de forma independiente se usa el launcher unico en raiz:
 
 - `run_foto_carne.py`
-- `run_foto_carne.bat`
+- `run.bat foto_carne`
+
+Launcher interno:
+
+- `scripts/bat/run_foto_carne.bat`
 
 Variables principales para Foto Carne:
 
@@ -159,7 +190,7 @@ Transiciones de estado durante el proceso:
 
 Salida local de Foto Carne:
 
-- `lotes/lote-foto-carne-DD-MM-YYYY-HH-MM-SS/<dni>/foto_carne_<dni>.jpg`
+- `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/foto_carne_<dni>.jpg`
 
 ### Defaults del flujo Foto Carne
 
@@ -189,7 +220,7 @@ Nota de compresion:
 ### Ejecucion de Foto Carne
 
 ```bat
-run_foto_carne.bat
+run.bat foto_carne
 ```
 
 ## Flujo DJ FUT
@@ -210,7 +241,7 @@ Transiciones de estado durante el proceso:
 
 Salida local de DJ FUT:
 
-- `lotes/lote-dj-fut-DD-MM-YYYY-HH-MM-SS/<dni>/djfut_<dni>.pdf`
+- `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/djfut_<dni>.pdf`
 
 ### Logica de fecha en DJ FUT
 
@@ -256,7 +287,7 @@ Implementacion operativa:
 ### Ejecucion de DJ FUT
 
 ```bat
-run_dj_fut.bat
+run.bat dj_fut
 ```
 
 ### Logs de DJ FUT
@@ -264,6 +295,8 @@ run_dj_fut.bat
 Por cada corrida se generan archivos en:
 
 - `logs/dj_fut/dj_fut_YYYYMMDD_HHMMSS/dj_fut.log`
+
+Se conservan como maximo 10 carpetas historicas en `logs/dj_fut`.
 
 ## Flujo Firma Digital
 
@@ -285,11 +318,11 @@ Transiciones de estado durante el proceso:
 
 Salida local de Firma Digital:
 
-- `lotes/lote-firma-digital-DD-MM-YYYY-HH-MM-SS/<dni>/firma_digital_<dni>.png`
+- `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/firma_digital_<dni>.png`
 
 Archivo temporal de trazabilidad (opcional):
 
-- `lotes/lote-firma-digital-DD-MM-YYYY-HH-MM-SS/<dni>/firma_digital_<dni>_tmp.png`
+- `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/firma_digital_<dni>_tmp.png`
 
 ### Logica de procesamiento de Firma Digital
 
@@ -350,7 +383,7 @@ El hook debe aceptar `dni` y `file_path` (por nombre o posicion), y retornar `bo
 ### Ejecucion de Firma Digital
 
 ```bat
-run_firma_digital.bat
+run.bat firma_digital
 ```
 
 ### Logs de Firma Digital
@@ -358,3 +391,5 @@ run_firma_digital.bat
 Por cada corrida se generan archivos en:
 
 - `logs/firma_digital/firma_digital_YYYYMMDD_HHMMSS/firma_digital.log`
+
+Se conservan como maximo 10 carpetas historicas en `logs/firma_digital`.

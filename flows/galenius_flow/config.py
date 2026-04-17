@@ -105,7 +105,7 @@ def load_galenius_config() -> GaleniusConfig:
     estado_sin_resultados = str(os.getenv("GALENIUS_ESTADO_SIN_RESULTADOS", "SIN REGISTROS")).strip()
     pdf_size_headroom_pct = float(str(os.getenv("GALENIUS_MAX_PDF_HEADROOM_PCT", "0.95") or "0.95").strip())
     pdf_size_headroom_pct = max(0.5, min(0.99, pdf_size_headroom_pct))
-    audit_max_run_dirs = max(1, int(str(os.getenv("GALENIUS_AUDIT_MAX_RUN_DIRS", "10") or "10").strip()))
+    audit_max_run_dirs = min(10, max(1, int(str(os.getenv("GALENIUS_AUDIT_MAX_RUN_DIRS", "10") or "10").strip())))
     max_lote_dirs = max(1, int(str(os.getenv("GALENIUS_MAX_LOTE_DIRS", "10") or "10").strip()))
     worker_count = max(1, min(4, int(str(os.getenv("GALENIUS_WORKERS", "4") or "4").strip())))
 

@@ -552,19 +552,23 @@ def _engrosar_si_tenue(mask, cv2_mod, np_mod):
     h, w = mask.shape[:2]
     fg_ratio = float(np_mod.count_nonzero(mask)) / float(max(1, h * w))
 
-    # Engrosado mucho mas conservador para evitar firmas "infladas".
-    if fg_ratio < 0.0018:
+    # Engrosado aun mas conservador para evitar firmas "infladas".
+    if fg_ratio < 0.0012:
         kernel = cv2_mod.getStructuringElement(cv2_mod.MORPH_ELLIPSE, (2, 2))
         out = cv2_mod.dilate(mask, kernel, iterations=1)
+        fg_before = float(np_mod.count_nonzero(mask))
+        fg_after = float(np_mod.count_nonzero(out))
+        if fg_before > 0 and (fg_after / fg_before) > 1.08:
+            return mask, "stroke_thickness_kept_overgrow_guard", False
         return out, "stroke_thickened_soft", True
 
-    if fg_ratio < 0.0040:
+    if fg_ratio < 0.0030:
         kernel = cv2_mod.getStructuringElement(cv2_mod.MORPH_ELLIPSE, (2, 2))
         out = cv2_mod.morphologyEx(mask, cv2_mod.MORPH_CLOSE, kernel, iterations=1)
         # Si el cierre añade demasiada masa, se descarta por fidelidad.
         fg_before = float(np_mod.count_nonzero(mask))
         fg_after = float(np_mod.count_nonzero(out))
-        if fg_before > 0 and (fg_after / fg_before) > 1.12:
+        if fg_before > 0 and (fg_after / fg_before) > 1.08:
             return mask, "stroke_thickness_kept_overgrow_guard", False
         return out, "stroke_thickened_micro", True
 

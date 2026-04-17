@@ -19,11 +19,45 @@ class JsonlEventLogger:
             handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
 
-def _prune_old_run_dirs(runs_root: Path, max_run_dirs: int) -> None:
-    if max_run_dirs <= 0 or not runs_root.exists():
+def _resolve_migration_target(logs_root: Path, item: Path) -> Path:
+    target = logs_root / item.name
+    if not target.exists():
+        return target
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    candidate = logs_root / f"{item.name}_migrated_{stamp}"
+    suffix = 1
+    while candidate.exists():
+        candidate = logs_root / f"{item.name}_migrated_{stamp}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _migrate_legacy_runs_dir(logs_root: Path) -> None:
+    legacy_runs_root = logs_root / "runs"
+    if not legacy_runs_root.exists() or not legacy_runs_root.is_dir():
         return
 
-    run_dirs = [path for path in runs_root.iterdir() if path.is_dir()]
+    for item in list(legacy_runs_root.iterdir()):
+        try:
+            target = _resolve_migration_target(logs_root, item)
+            shutil.move(str(item), str(target))
+        except Exception:
+            # La migracion es best-effort; la ejecucion del flujo no debe bloquearse por esto.
+            continue
+
+    shutil.rmtree(legacy_runs_root, ignore_errors=True)
+
+
+def _prune_old_run_dirs(logs_root: Path, max_run_dirs: int, run_prefix: str | None = None) -> None:
+    if max_run_dirs <= 0 or not logs_root.exists():
+        return
+
+    run_dirs = [
+        path
+        for path in logs_root.iterdir()
+        if path.is_dir() and (run_prefix is None or path.name.startswith(run_prefix))
+    ]
     if len(run_dirs) <= max_run_dirs:
         return
 
@@ -34,13 +68,13 @@ def _prune_old_run_dirs(runs_root: Path, max_run_dirs: int) -> None:
 
 def setup_run_logging(logs_root: Path, run_name: str = "galenius", max_run_dirs: int = 10) -> tuple[logging.Logger, Path, JsonlEventLogger]:
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    runs_root = logs_root / "runs"
-    runs_root.mkdir(parents=True, exist_ok=True)
+    logs_root.mkdir(parents=True, exist_ok=True)
+    _migrate_legacy_runs_dir(logs_root)
 
-    run_dir = runs_root / f"{run_name}_{run_id}"
+    run_dir = logs_root / f"{run_name}_{run_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    _prune_old_run_dirs(runs_root, max_run_dirs)
+    _prune_old_run_dirs(logs_root, max_run_dirs, run_prefix=f"{run_name}_")
 
     log_file = run_dir / f"{run_name}.log"
     events_file = run_dir / "events.jsonl"

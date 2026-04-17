@@ -276,7 +276,8 @@ Se agrego una base no monolitica para el nuevo flujo de certificados medicos:
 - `flows/galenius_flow/main_flow.py`: script unico del flujo (etapa actual: login robusto).
 - `flows/galenius_flow/logging_utils.py`: logging por corrida y eventos JSONL.
 - `run_galenius.py`: entrypoint unico del flujo Galenius.
-- `run_galenius_login.bat`: launcher para Windows (invoca solo `run_galenius.py`).
+- `run.bat`: launcher unico para los flujos principales.
+- `scripts/bat/run_galenius_login.bat`: launcher interno de Galenius.
 
 ### Variables de entorno para Galenius
 
@@ -291,26 +292,30 @@ Variables minimas para probar login:
 ### Ejecucion (script unico)
 
 ```bat
-run_galenius_login.bat
+run.bat
 ```
 
 Log generado por corrida:
 
-- `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/galenius_flow.log`
-- `logs/galenius/runs/galenius_flow_YYYYMMDD_HHMMSS/events.jsonl`
+- `logs/galenius/galenius_flow_YYYYMMDD_HHMMSS/galenius_flow.log`
+- `logs/galenius/galenius_flow_YYYYMMDD_HHMMSS/events.jsonl`
 
 ## Flujo Foto Carne (separado)
 
 Runner independiente:
 
 - `run_foto_carne.py`
-- `run_foto_carne.bat`
+- `run.bat foto_carne`
+
+Launcher interno:
+
+- `scripts/bat/run_foto_carne.bat`
 
 Comportamiento:
 
 - Lee cola desde `BOT DOCUMENTOS` por `DNI`.
 - Busca `DNI` en hoja fuente de fotos.
-- Descarga desde `Cargar Foto` y guarda JPG en lote propio.
+- Descarga desde `Cargar Foto` y guarda JPG en el mismo lote compartido por `run.bat`.
 - Actualiza en la hoja `ESTADO FOTO CARNÉ` y `OBSERVACION FOTO CARNÉ`.
 
 Defaults actuales:

@@ -2,6 +2,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue, Empty
 from pathlib import Path
+import os
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -139,6 +140,14 @@ def _estado_normalizado(value: str) -> str:
 
 
 def _crear_directorio_lote(cfg: GaleniusConfig) -> tuple[str, object]:
+    lote_compartido_raw = str(os.getenv("GLOBAL_LOTE_DIR", "")).strip()
+    if lote_compartido_raw:
+        lote_dir = Path(lote_compartido_raw)
+        if not lote_dir.is_absolute():
+            lote_dir = cfg.base_dir / lote_dir
+        lote_dir.mkdir(parents=True, exist_ok=True)
+        return lote_dir.name, lote_dir
+
     fecha_lote = datetime.now().strftime("%d-%m-%Y-%H-%M-%S")
     lote_nombre = f"lote-{fecha_lote}"
     lote_dir = cfg.base_dir / "lotes" / lote_nombre
