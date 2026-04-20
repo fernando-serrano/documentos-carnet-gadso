@@ -55,23 +55,31 @@ call :prepare_shared_lote
 if errorlevel 1 exit /b 1
 
 set "FLOW_NAME=galenius"
+echo [RUN] Iniciando GALENIUS...
 call "scripts\bat\run_galenius_login.bat"
 set "EXIT_CODE=%ERRORLEVEL%"
+echo [RUN] GALENIUS finalizo con codigo %EXIT_CODE%.
 if not "%EXIT_CODE%"=="0" goto flow_error
 
 set "FLOW_NAME=foto_carne"
+echo [RUN] Iniciando FOTO CARNE...
 call "scripts\bat\run_foto_carne.bat"
 set "EXIT_CODE=%ERRORLEVEL%"
+echo [RUN] FOTO CARNE finalizo con codigo %EXIT_CODE%.
 if not "%EXIT_CODE%"=="0" goto flow_error
 
 set "FLOW_NAME=dj_fut"
+echo [RUN] Iniciando DJ FUT...
 call "scripts\bat\run_dj_fut.bat"
 set "EXIT_CODE=%ERRORLEVEL%"
+echo [RUN] DJ FUT finalizo con codigo %EXIT_CODE%.
 if not "%EXIT_CODE%"=="0" goto flow_error
 
 set "FLOW_NAME=firma_digital"
+echo [RUN] Iniciando FIRMA DIGITAL...
 call "scripts\bat\run_firma_digital.bat"
 set "EXIT_CODE=%ERRORLEVEL%"
+echo [RUN] FIRMA DIGITAL finalizo con codigo %EXIT_CODE%.
 if not "%EXIT_CODE%"=="0" goto flow_error
 
 echo [RUN] Flujo completo finalizado en lote compartido.
