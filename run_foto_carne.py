@@ -350,4 +350,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    exit_code = main()
+    logging.shutdown()
+    # Algunas dependencias de imagen/IA pueden dejar hilos nativos vivos en ciertos equipos.
+    # Forzamos la salida para que run.bat recupere el control y continue con DJ FUT.
+    os._exit(exit_code)

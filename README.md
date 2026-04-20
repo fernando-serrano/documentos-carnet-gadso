@@ -1,5 +1,48 @@
 # Flujos Documentales - Galenius, Foto Carne, DJ FUT y Firma Digital
 
+## Instalacion Inicial
+
+Pasos minimos para preparar una maquina nueva desde cero:
+
+1. Instalar Python 3 desde la pagina oficial: https://www.python.org/downloads/
+
+   Durante la instalacion en Windows, marcar la opcion `Add python.exe to PATH`.
+
+2. Abrir PowerShell o CMD dentro de la carpeta del proyecto.
+
+3. Verificar que Python y pip quedaron disponibles:
+
+```powershell
+python --version
+pip --version
+```
+
+4. Instalar las dependencias del proyecto:
+
+```powershell
+pip install -r requirements.txt
+```
+
+5. Instalar los navegadores que necesita Playwright:
+
+```powershell
+python -m playwright install
+```
+
+   Si solo se usara Chromium, se puede instalar unicamente ese navegador:
+
+```powershell
+python -m playwright install chromium
+```
+
+6. Configurar el archivo `.env` con las credenciales y variables necesarias.
+
+7. Ejecutar el flujo desde el launcher correspondiente, por ejemplo:
+
+```powershell
+.\run.bat
+```
+
 Este repositorio, en este contexto de trabajo, concentra los flujos documentales de:
 
 - Galenius (certificado medico)
