@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0\..\.."
-python run_firma_digital.py
+.venv\Scripts\python.exe run_firma_digital.py
 set EXIT_CODE=%ERRORLEVEL%
 if not "%EXIT_CODE%"=="0" (
   echo.

@@ -43,6 +43,9 @@ class FotoCarneConfig:
     max_lote_dirs: int
     min_jpeg_quality: int
     max_jpeg_oversize_pct: float
+    save_original: bool
+    estado_revision_manual: str
+    max_dim: int
 
 
 def load_foto_carne_config() -> FotoCarneConfig:
@@ -52,7 +55,8 @@ def load_foto_carne_config() -> FotoCarneConfig:
     queue_sheet_url = str(os.getenv("FOTO_CARNE_QUEUE_SHEET_URL", os.getenv("GALENIUS_QUEUE_SHEET_URL", ""))).strip()
     source_sheet_url = str(os.getenv("FOTO_CARNE_SOURCE_SHEET_URL", "")).strip()
     drive_credentials_json = str(os.getenv("FOTO_CARNE_DRIVE_CREDENTIALS_JSON", os.getenv("DRIVE_CREDENTIALS_JSON", ""))).strip()
-    max_kb = max(20, int(str(os.getenv("FOTO_CARNE_MAX_KB", "80") or "80").strip()))
+    # Default 79: 79 * 1024 * 0.95 (headroom) ~= 75.0 KB -> tope duro de 75 KB.
+    max_kb = max(20, int(str(os.getenv("FOTO_CARNE_MAX_KB", "79") or "79").strip()))
     headroom_pct = float(str(os.getenv("FOTO_CARNE_HEADROOM_PCT", "0.95") or "0.95").strip())
     headroom_pct = max(0.5, min(0.99, headroom_pct))
     overwrite_existing = _as_bool(os.getenv("FOTO_CARNE_OVERWRITE_EXISTING", "0"), default=False)
@@ -66,6 +70,11 @@ def load_foto_carne_config() -> FotoCarneConfig:
     min_jpeg_quality = max(30, min(80, int(str(os.getenv("FOTO_CARNE_MIN_JPEG_QUALITY", "50") or "50").strip())))
     max_jpeg_oversize_pct = float(str(os.getenv("FOTO_CARNE_MAX_JPEG_OVERSIZE_PCT", "1.15") or "1.15").strip())
     max_jpeg_oversize_pct = max(1.0, min(1.4, max_jpeg_oversize_pct))
+    save_original = _as_bool(os.getenv("FOTO_CARNE_SAVE_ORIGINAL", "1"), default=True)
+    estado_revision_manual = str(os.getenv("FOTO_CARNE_ESTADO_REVISION_MANUAL", "REVISAR MANUAL")).strip()
+    # Lado mayor maximo de la foto de salida (carne). Limitar resolucion evita el pixelado:
+    # se reduce tamanio manteniendo calidad JPEG alta, en vez de bajar calidad a resolucion full.
+    max_dim = max(300, int(str(os.getenv("FOTO_CARNE_MAX_DIM", "600") or "600").strip()))
 
     return FotoCarneConfig(
         base_dir=base_dir,
@@ -86,6 +95,9 @@ def load_foto_carne_config() -> FotoCarneConfig:
         max_lote_dirs=max_lote_dirs,
         min_jpeg_quality=min_jpeg_quality,
         max_jpeg_oversize_pct=max_jpeg_oversize_pct,
+        save_original=save_original,
+        estado_revision_manual=estado_revision_manual,
+        max_dim=max_dim,
     )
 
 
@@ -156,7 +168,7 @@ def _worker_foto_carne(
     logger,
 ) -> dict[str, int]:
     worker_tag = f"W{worker_id}"
-    resumen = {"procesados": 0, "descargados": 0, "sin_registros": 0, "errores": 0}
+    resumen = {"procesados": 0, "descargados": 0, "revision_manual": 0, "sin_registros": 0, "errores": 0}
 
     while True:
         try:
@@ -197,17 +209,42 @@ def _worker_foto_carne(
                 overwrite_existing=cfg.overwrite_existing,
                 min_jpeg_quality=cfg.min_jpeg_quality,
                 max_jpeg_oversize_pct=cfg.max_jpeg_oversize_pct,
+                save_original=cfg.save_original,
+                max_dim=cfg.max_dim,
             )
             resumen["procesados"] += 1
             if resultado.get("status") == "ok":
                 resumen["descargados"] += 1
-                logger.info("[FOTO CARNE][%s][%s] OK | %s", worker_tag, dni, resultado.get("local_path", ""))
+                logger.info(
+                    "[FOTO CARNE][%s][%s] OK | %s | %s",
+                    worker_tag,
+                    dni,
+                    resultado.get("local_path", ""),
+                    resultado.get("detail", ""),
+                )
                 _marcar_fila_foto_carne(
                     cfg,
                     fieldnames,
                     row_number,
                     cfg.estado_descargado,
                     str(resultado.get("observation", "DESCARGADO SIN OBSERVACIONES")),
+                    logger,
+                )
+            elif resultado.get("status") == "revision_manual":
+                resumen["revision_manual"] += 1
+                logger.warning(
+                    "[FOTO CARNE][%s][%s] REVISION MANUAL | %s | %s",
+                    worker_tag,
+                    dni,
+                    resultado.get("observation", ""),
+                    resultado.get("detail", ""),
+                )
+                _marcar_fila_foto_carne(
+                    cfg,
+                    fieldnames,
+                    row_number,
+                    cfg.estado_revision_manual,
+                    str(resultado.get("observation", "FOTO REQUIERE REVISION MANUAL")),
                     logger,
                 )
             elif resultado.get("status") == "sin_registros":
@@ -312,6 +349,7 @@ def main() -> int:
 
     procesados = 0
     descargados = 0
+    revision_manual = 0
     sin_registros = 0
     errores = 0
 
@@ -334,19 +372,24 @@ def main() -> int:
                 result = future.result()
                 procesados += result.get("procesados", 0)
                 descargados += result.get("descargados", 0)
+                revision_manual += result.get("revision_manual", 0)
                 sin_registros += result.get("sin_registros", 0)
                 errores += result.get("errores", 0)
 
     logger.info(
-        "[FOTO CARNE] Flujo completado | workers=%s | procesados=%s | descargados=%s | sin_registros=%s | errores=%s | lote=%s",
+        "[FOTO CARNE] Flujo completado | workers=%s | procesados=%s | descargados=%s | revision_manual=%s | sin_registros=%s | errores=%s | lote=%s",
         worker_count,
         procesados,
         descargados,
+        revision_manual,
         sin_registros,
         errores,
         lote_dir,
     )
-    return 0 if errores == 0 else 1
+    # Los errores por-registro (p.ej. foto de un DNI no es imagen valida) NO son fatales:
+    # ya quedan marcados en la hoja como ERROR y en el log. Devolvemos 0 para que run.bat
+    # continue con DJ FUT y Firma. Solo los fallos de config (.env) devuelven !=0 (return 2).
+    return 0
 
 
 if __name__ == "__main__":

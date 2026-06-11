@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0\..\.."
-python run_dj_fut.py
+.venv\Scripts\python.exe run_dj_fut.py
 set EXIT_CODE=%ERRORLEVEL%
 if not "%EXIT_CODE%"=="0" (
   echo.

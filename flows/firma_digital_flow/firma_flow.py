@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
+from flows.common.utils import guardar_original
 from .sheets import read_google_sheet_rows
 
 
@@ -1021,6 +1022,7 @@ def procesar_firma_digital_por_dni(
     upload_enabled: bool,
     upload_callable: str,
     keep_temp_files: bool,
+    save_original: bool = True,
 ) -> dict:
     dni_digits = _normalizar_dni(dni)
     if not dni_digits:
@@ -1057,6 +1059,23 @@ def procesar_firma_digital_por_dni(
             "observation": f"{dni_digits} ERROR DESCARGA FIRMA DIGITAL",
             "detail": str(exc),
         }
+
+    original_path = None
+    original_detail = "original_skip"
+    if save_original:
+        try:
+            original_path = guardar_original(
+                lote_dir,
+                dni_digits,
+                content,
+                mime,
+                prefix="firma_digital",
+                overwrite_existing=overwrite_existing,
+            )
+            original_detail = f"original_saved={original_path.name}"
+        except Exception as exc:
+            # No bloquear el tratamiento si falla guardar la original.
+            original_detail = f"original_error={exc}"
 
     try:
         image = _abrir_imagen_procesable(content)
@@ -1141,8 +1160,9 @@ def procesar_firma_digital_por_dni(
         return {
             "status": "ok_procesado",
             "observation": obs,
-            "detail": f"mime={mime} {process_detail} {png_detail}",
+            "detail": f"mime={mime} {original_detail} {process_detail} {png_detail}",
             "local_path": str(local_path),
+            "original_path": str(original_path) if original_path else "",
             "temp_path": str(temp_path) if temp_path else "",
         }
 
@@ -1163,7 +1183,8 @@ def procesar_firma_digital_por_dni(
     return {
         "status": "ok_cargado",
         "observation": obs,
-        "detail": f"mime={mime} {process_detail} {png_detail} {upload_detail}",
+        "detail": f"mime={mime} {original_detail} {process_detail} {png_detail} {upload_detail}",
         "local_path": str(local_path),
+        "original_path": str(original_path) if original_path else "",
         "temp_path": str(temp_path) if temp_path else "",
     }

@@ -66,6 +66,7 @@ class FirmaDigitalConfig:
     upload_enabled: bool
     upload_callable: str
     keep_temp_files: bool
+    save_original: bool
 
 
 def load_firma_digital_config() -> FirmaDigitalConfig:
@@ -106,6 +107,7 @@ def load_firma_digital_config() -> FirmaDigitalConfig:
     upload_enabled = _as_bool(os.getenv("FIRMA_DIGITAL_UPLOAD_ENABLED", "0"), default=False)
     upload_callable = str(os.getenv("FIRMA_DIGITAL_UPLOAD_CALLABLE", "")).strip()
     keep_temp_files = _as_bool(os.getenv("FIRMA_DIGITAL_KEEP_TMP", "0"), default=False)
+    save_original = _as_bool(os.getenv("FIRMA_DIGITAL_SAVE_ORIGINAL", "1"), default=True)
 
     return FirmaDigitalConfig(
         base_dir=base_dir,
@@ -132,6 +134,7 @@ def load_firma_digital_config() -> FirmaDigitalConfig:
         upload_enabled=upload_enabled,
         upload_callable=upload_callable,
         keep_temp_files=keep_temp_files,
+        save_original=save_original,
     )
 
 
@@ -275,6 +278,7 @@ def _worker_firma_digital(
                 upload_enabled=cfg.upload_enabled,
                 upload_callable=cfg.upload_callable,
                 keep_temp_files=cfg.keep_temp_files,
+                save_original=cfg.save_original,
             )
             resumen["procesados"] += 1
             status = str(resultado.get("status", "")).strip().lower()
@@ -459,7 +463,9 @@ def main() -> int:
         errores,
         lote_dir,
     )
-    return 0 if errores == 0 else 1
+    # Errores por-registro NO son fatales: quedan marcados en la hoja y el log.
+    # Devolvemos 0 para no romper la cadena de run.bat. Config fallida devuelve return 2.
+    return 0
 
 
 if __name__ == "__main__":

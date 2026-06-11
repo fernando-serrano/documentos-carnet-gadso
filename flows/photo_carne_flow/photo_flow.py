@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+from flows.common.utils import guardar_original
 from .sheets import read_google_sheet_rows
 
 
@@ -129,6 +130,40 @@ def _cargar_rembg():
     return rembg_mod
 
 
+_heif_registrado = False
+
+
+def _registrar_heif() -> bool:
+    """Registra el lector HEIF/HEIC en PIL (best-effort, una sola vez).
+
+    Con pillow-heif registrado, Image.open() abre fotos HEIC de iPhone de forma
+    transparente y el pipeline las guarda como JPEG. Devuelve True si quedo disponible.
+    """
+    global _heif_registrado
+    if _heif_registrado:
+        return True
+    try:
+        from pillow_heif import register_heif_opener
+
+        register_heif_opener()
+        _heif_registrado = True
+    except Exception:
+        _heif_registrado = False
+    return _heif_registrado
+
+
+def _es_heic(content: bytes, mime: str) -> bool:
+    """Detecta HEIC/HEIF por MIME de Drive o por magic bytes (caja ftyp + marca)."""
+    clave = str(mime or "").strip().lower()
+    if "heic" in clave or "heif" in clave:
+        return True
+    if content[:4] and content[4:8] == b"ftyp":
+        marca = content[8:12].lower()
+        if marca in (b"heic", b"heif", b"heix", b"mif1", b"hevc", b"msf1"):
+            return True
+    return False
+
+
 def _detectar_rostros_frontal(img_rgb: Image.Image) -> list[tuple[int, int, int, int]]:
     cv2_mod = _cargar_cv2()
     if cv2_mod is False:
@@ -236,135 +271,190 @@ def _forzar_relacion_3x4(img_rgb: Image.Image) -> tuple[Image.Image, str]:
     return cropped, "aspect_crop_height"
 
 
-def _fondo_es_mayormente_blanco(img_rgb: Image.Image) -> bool:
-    cv2_mod = _cargar_cv2()
-    if cv2_mod is False:
-        return False
-
+def _fondo_ya_es_blanco(img_rgb: Image.Image) -> tuple[bool, str]:
+    """
+    Detecta si el fondo del original YA es blanco/uniforme ("color continuo, cambios
+    minimos"): borde claro, de baja desviacion (uniforme) y neutro. Si lo es, NO hace falta
+    remover el fondo -> se evita el falso positivo de rembg que come la vestimenta.
+    Devuelve (es_blanco, detalle).
+    """
     np_mod = importlib.import_module("numpy")
-    arr = np_mod.array(img_rgb)
+    arr = np_mod.array(img_rgb.convert("RGB")).astype(np_mod.int16)
     h, w = arr.shape[:2]
-    border_px = max(12, int(min(h, w) * 0.08))
-
-    strips = [
-        arr[:border_px, :, :],
-        arr[h - border_px :, :, :],
-        arr[:, :border_px, :],
-        arr[:, w - border_px :, :],
+    bw = max(10, int(min(h, w) * 0.07))
+    # Borde de fondo: franja superior (sobre la cabeza) + lados en la mitad superior.
+    parts = [
+        arr[:bw, :, :].reshape(-1, 3),
+        arr[:int(h * 0.60), :bw, :].reshape(-1, 3),
+        arr[:int(h * 0.60), w - bw:, :].reshape(-1, 3),
     ]
-    border = np_mod.concatenate([s.reshape(-1, 3) for s in strips], axis=0)
-
-    white_mask = (border[:, 0] >= 235) & (border[:, 1] >= 235) & (border[:, 2] >= 235)
-    white_ratio = float(white_mask.mean()) if border.size else 0.0
-    return white_ratio >= 0.72
+    px = np_mod.concatenate(parts, axis=0)
+    mn = px.min(axis=1)
+    chroma = px.max(axis=1) - px.min(axis=1)
+    # FRACCION del borde que es claro+neutro (robusto al cabello del sujeto: si un poco de
+    # pelo entra al muestreo, el resto del fondo sigue contando como blanco).
+    es_claro = (mn >= 200) & (chroma <= 16)
+    ratio = float(es_claro.mean())
+    claros = mn[es_claro]
+    desv = float(np_mod.std(claros)) if claros.size else 99.0
+    es_blanco = (ratio >= 0.80) and (desv <= 18)
+    return es_blanco, f"bg_check ratio={ratio:.2f} std_claros={int(desv)} ya_blanco={es_blanco}"
 
 
 def _limpiar_foto_ia(img_rgb: Image.Image) -> tuple[Image.Image, str, bool]:
     """
-    Segmentación IA (rembg + U²-Net) para remover fondo.
-    Mucho más preciso que OpenCV clásico para fotos con iluminación irregular.
-    Devuelve (imagen_procesada, detalle, fue_aplicado).
+    Remueve el fondo con rembg (IA) y lo pone blanco puro. CORREGIDO para evitar los
+    defectos de antes:
+      - Mascara BINARIA (umbral 128), no se compone con alpha parcial -> no "lava" el saco.
+      - Se conserva el componente que CONTIENE EL ROSTRO + los componentes grandes (cuerpo)
+        -> imposible decapitar aunque la mascara separe cabeza y torso.
+      - Erosion de 1px -> sin halo de fleco alrededor del cabello.
+    Separa por FORMA del cuerpo (no por color), asi distingue camisa-blanca de fondo-blanco.
+    Devuelve (imagen, detalle, aplicado).
     """
     rembg_mod = _cargar_rembg()
     if rembg_mod is False:
-        return img_rgb, "bg_remove_ia_skip_rembg_unavailable", False
+        return img_rgb, "bg_ia_skip_no_rembg", False
 
     try:
-        # rembg.remove() retorna imagen con canal alpha (RGBA con fondo transparente)
-        output = rembg_mod.remove(img_rgb, alpha_matting=True, alpha_matting_foreground_threshold=240)
+        output = rembg_mod.remove(img_rgb)
+        if output.mode != "RGBA":
+            output = output.convert("RGBA")
 
-        # Convertir a fondo blanco puro (SUCAMEC estándar)
-        background = Image.new("RGBA", output.size, (255, 255, 255, 255))
-        final = Image.alpha_composite(background, output)
-        final = final.convert("RGB")
+        np_mod = importlib.import_module("numpy")
+        r, g, b, a = output.split()
+        a_np = np_mod.array(a)
+        fg = (a_np >= 128).astype(np_mod.uint8)
+        if fg.sum() == 0:
+            return img_rgb, "bg_ia_skip_mascara_vacia", False
 
-        # Post-procesado OpenCV ligero: bilateral filter para suavizar piel sin perder detalle
         cv2_mod = _cargar_cv2()
         if cv2_mod is not False:
-            try:
-                np_mod = importlib.import_module("numpy")
-                img_cv = cv2_mod.cvtColor(np_mod.array(final), cv2_mod.COLOR_RGB2BGR)
-                # Bilateral filter: suaviza piel pero preserva bordes
-                img_cv = cv2_mod.bilateralFilter(img_cv, 9, 75, 75)
-                img_cv = cv2_mod.cvtColor(img_cv, cv2_mod.COLOR_BGR2RGB)
-                final = Image.fromarray(img_cv)
-            except Exception:
-                # Si bilateral falla, usamos resultado sin suavizado
-                pass
+            num, labels, stats, _cent = cv2_mod.connectedComponentsWithStats(fg, connectivity=8)
+            if num > 2:
+                keep = set()
+                # Anclar al rostro: conservar el componente del centro del rostro.
+                try:
+                    face = _seleccionar_rostro_confiable(_detectar_rostros_frontal(img_rgb), fg.shape[1], fg.shape[0])
+                except Exception:
+                    face = None
+                if face is not None:
+                    fcx = int(face[0] + face[2] * 0.5)
+                    fcy = int(face[1] + face[3] * 0.5)
+                    if 0 <= fcy < labels.shape[0] and 0 <= fcx < labels.shape[1]:
+                        lab = int(labels[fcy, fcx])
+                        if lab != 0:
+                            keep.add(lab)
+                # Conservar tambien los componentes grandes (cuerpo) >= 4% del area.
+                min_area = int(0.04 * fg.size)
+                for i in range(1, num):
+                    if int(stats[i, cv2_mod.CC_STAT_AREA]) >= min_area:
+                        keep.add(i)
+                if not keep:  # respaldo: el mayor
+                    keep.add(1 + int(np_mod.argmax(stats[1:, cv2_mod.CC_STAT_AREA])))
+                fg = np_mod.isin(labels, list(keep)).astype(np_mod.uint8)
+            # Erosionar 1px para recortar el fleco residual del borde.
+            fg = cv2_mod.erode(fg, np_mod.ones((3, 3), np_mod.uint8), iterations=1)
 
-        return final, "bg_white_ia_applied", True
-
+        a_bin = np_mod.where(fg > 0, 255, 0).astype(np_mod.uint8)
+        output.putalpha(Image.fromarray(a_bin))
+        background = Image.new("RGBA", output.size, (255, 255, 255, 255))
+        final = Image.alpha_composite(background, output).convert("RGB")
+        return final, "bg_white_ia", True
     except Exception as exc:
-        return img_rgb, f"bg_remove_ia_error={exc}", False
+        return img_rgb, f"bg_ia_error={exc}", False
 
 
-def _remover_fondo_blanco_conservador(img_rgb: Image.Image) -> tuple[Image.Image, str, bool]:
-    cv2_mod = _cargar_cv2()
-    if cv2_mod is False:
-        return img_rgb, "bg_remove_skip_no_cv2", False
+def _blanquear_fondo_seguro(img_rgb: Image.Image) -> tuple[Image.Image, str, bool]:
+    """
+    Blanqueo SEGURO de fondo: operacion global por pixel, SIN IA ni segmentacion.
 
+    Lleva a blanco puro SOLO los pixeles casi-blancos y de baja croma (el fondo de
+    estudio claro). La piel (calida, croma alta), el pelo y la ropa oscura quedan FUERA
+    de la mascara -> intactos. Por construccion es imposible cortar la cabeza o dejar
+    halos (no hay componentes conexos, floodFill ni rembg; es por-pixel).
+
+    Devuelve (imagen, detalle, aplicado).
+    """
     np_mod = importlib.import_module("numpy")
-    arr = np_mod.array(img_rgb)
+    arr = np_mod.array(img_rgb.convert("RGB"))
     h, w = arr.shape[:2]
 
-    faces = _detectar_rostros_frontal(img_rgb)
-    face = _seleccionar_rostro_confiable(faces, w, h)
-    if face is None:
-        return img_rgb, "bg_remove_skip_face_not_confident", False
+    # Datos medidos: fondo de estudio = neutro (croma ~0-2) y claro (~200-242, incluso en la
+    # sombra del gradiente). Piel = oscura (min-canal ~110) y cromatica (~75). Estan muy
+    # separados, asi que T=180 blanquea TODO el gradiente del fondo (sin borde irregular) y
+    # deja intactos piel (croma alta) y saco/pelo oscuros (<180). C=14 cubre fondo leve-tinte.
+    T = 180  # luminosidad minima para "claro" (cubre el gradiente completo del fondo)
+    C = 14   # croma maxima (max-min): el fondo es neutro; la piel tiene croma muy superior
+    mn = arr.min(axis=2)
+    mx = arr.max(axis=2)
+    near = ((mn >= T) & ((mx.astype(np_mod.int16) - mn.astype(np_mod.int16)) <= C)).astype(np_mod.uint8)
 
-    fx, fy, fw, fh = face
-    rect_x = max(1, int(fx - fw * 1.2))
-    rect_y = max(1, int(fy - fh * 0.8))
-    rect_w = min(w - rect_x - 1, int(fw * 3.4))
-    rect_h = min(h - rect_y - 1, int(fh * 5.0))
+    if near.sum() == 0:
+        return img_rgb, "bg_white_seguro px=0", False
 
-    if rect_w < int(w * 0.35) or rect_h < int(h * 0.45):
-        margin = max(6, int(min(w, h) * 0.05))
-        rect_x = margin
-        rect_y = margin
-        rect_w = w - (margin * 2)
-        rect_h = h - (margin * 2)
+    cv2_mod = _cargar_cv2()
+    if cv2_mod is not False:
+        # Clasificar cada region clara `near` por que bordes toca:
+        #  - toca SUPERIOR/IZQ/DER pero NO el inferior -> FONDO puro (alrededor de la
+        #    persona) -> blanquear COMPLETO (sin banda).
+        #  - toca arriba/lados Y abajo -> camisa-blanca y fondo son UNA sola region
+        #    (sin saco que los separe) -> ambiguo -> blanquear solo lo de AFUERA de la
+        #    silueta del cuerpo (alrededor de la cabeza), protegiendo la vestimenta.
+        #  - toca solo el inferior / ningun borde sembrado -> vestimenta -> NO tocar.
+        num, labels = cv2_mod.connectedComponents(near, connectivity=4)
+        # Bordes "de fondo": superior, izq, der, y las ESQUINAS inferiores (ahi suele
+        # asomarse el fondo junto a los hombros). El centro del borde inferior NO va aqui.
+        bx = int(w * 0.20)
+        top_side = set(labels[0, :].tolist()) | set(labels[:, 0].tolist()) | set(labels[:, w - 1].tolist())
+        top_side |= set(labels[h - 1, :bx].tolist()) | set(labels[h - 1, w - bx:].tolist())
+        top_side.discard(0)  # label 0 = pixeles NO-near (sujeto)
+        # Borde inferior CENTRAL = vestimenta (el cuerpo esta al centro abajo).
+        bottom = set(labels[h - 1, bx:w - bx].tolist())
+        bottom.discard(0)
+        pure_labels = list(top_side - bottom)
+        amb_labels = list(top_side & bottom)
+        pure_bg = np_mod.isin(labels, pure_labels) if pure_labels else np_mod.zeros((h, w), dtype=bool)
+        ambiguo = np_mod.isin(labels, amb_labels) if amb_labels else np_mod.zeros((h, w), dtype=bool)
 
-    if rect_w <= 2 or rect_h <= 2:
-        return img_rgb, "bg_remove_skip_invalid_rect", False
+        # Silueta del cuerpo bajo el rostro (trapecio que ensancha hacia los hombros).
+        protect = np_mod.zeros((h, w), dtype=bool)
+        try:
+            face = _seleccionar_rostro_confiable(_detectar_rostros_frontal(img_rgb), w, h)
+        except Exception:
+            face = None
+        if face is not None:
+            fx, fy, fw, fh = face
+            fcx = fx + fw * 0.5
+            top = int(fy + fh * 0.85)  # apenas debajo del menton
+            ys = np_mod.arange(h)
+            t = np_mod.clip((ys - top) / float(max(1, h - top)), 0.0, 1.0)
+            half = fw * 0.85 + t * (w * 0.45 - fw * 0.85)
+            xs = np_mod.arange(w)[None, :]
+            protect = (np_mod.abs(xs - fcx) <= half[:, None]) & (ys[:, None] >= top)
 
-    bgd_model = np_mod.zeros((1, 65), np_mod.float64)
-    fgd_model = np_mod.zeros((1, 65), np_mod.float64)
-    mask = np_mod.zeros((h, w), np_mod.uint8)
+        mask = pure_bg | (ambiguo & ~protect)
+    else:
+        mask = near.astype(bool)  # fallback per-pixel si no hay cv2
 
-    try:
-        cv2_mod.grabCut(
-            arr,
-            mask,
-            (int(rect_x), int(rect_y), int(rect_w), int(rect_h)),
-            bgd_model,
-            fgd_model,
-            3,
-            cv2_mod.GC_INIT_WITH_RECT,
-        )
-    except Exception as exc:
-        return img_rgb, f"bg_remove_skip_grabcut_error={exc}", False
-
-    fg_mask = (mask == cv2_mod.GC_FGD) | (mask == cv2_mod.GC_PR_FGD)
-    fg_ratio = float(fg_mask.mean())
-    if fg_ratio < 0.18 or fg_ratio > 0.86:
-        return img_rgb, "bg_remove_skip_unstable_mask", False
+    px = int(mask.sum())
+    if px == 0:
+        return img_rgb, "bg_white_seguro px=0", False
 
     out = arr.copy()
-    out[~fg_mask] = (255, 255, 255)
-
-    white_bg_ratio = float((out[~fg_mask] >= 245).all(axis=1).mean()) if (~fg_mask).any() else 0.0
-    if white_bg_ratio < 0.95:
-        return img_rgb, "bg_remove_skip_low_white_ratio", False
-
-    out_img = Image.fromarray(out)
-    return out_img, "bg_white_applied", True
+    out[mask] = (255, 255, 255)
+    return Image.fromarray(out), f"bg_white_seguro px={px}", True
 
 
 def _aplicar_pretratamiento_general(image: Image.Image) -> tuple[Image.Image, str, bool]:
     img = ImageOps.exif_transpose(image).convert("RGB")
     detalles: list[str] = []
     fondo_blanco_aplicado = False
+
+    # Chequeo PREVIO (antes de editar/recortar): si el fondo ya es blanco/uniforme, no se
+    # remueve (evita falsos positivos de rembg que comen la vestimenta, p.ej. 77674698).
+    ya_blanco, bg_chk = _fondo_ya_es_blanco(img)
+    detalles.append(bg_chk)
 
     try:
         faces = _detectar_rostros_frontal(img)
@@ -389,22 +479,29 @@ def _aplicar_pretratamiento_general(image: Image.Image) -> tuple[Image.Image, st
     if aspect_detail:
         detalles.append(aspect_detail)
 
-    if not _fondo_es_mayormente_blanco(img):
-        # Intentar IA primero (rembg + U²-Net), fallback a OpenCV si falla
+    if ya_blanco:
+        # El fondo ya es blanco/uniforme -> NO se remueve. Solo se recorto. La vestimenta
+        # queda 100% intacta (no hay riesgo de que rembg la coma).
+        detalles.append("bg_already_white_skip")
+    else:
+        # 1) rembg (IA) CORREGIDO: separa por forma del cuerpo -> fondo blanco limpio en
+        #    TODOS los casos (incluida camisa-blanca-sobre-fondo-blanco), sin decapitar ni halos.
         img_bg, bg_detail, applied = _limpiar_foto_ia(img)
         detalles.append(bg_detail)
         if applied:
             img = img_bg
             fondo_blanco_aplicado = True
         else:
-            # Fallback a OpenCV clásico si IA no fue aplicada
-            img_bg, bg_detail_cv, applied_cv = _remover_fondo_blanco_conservador(img)
-            detalles.append(bg_detail_cv)
-            if applied_cv:
+            # 2) Fallback SIN IA (si rembg no esta disponible o falla): blanqueo por color.
+            img_bg, bg_detail2, applied2 = _blanquear_fondo_seguro(img)
+            detalles.append(bg_detail2)
+            if applied2:
                 img = img_bg
                 fondo_blanco_aplicado = True
-    else:
-        detalles.append("bg_already_white")
+
+    # NOTA: NO se hace recorte automatico del logo de IA (Gemini): la deteccion de la
+    # estrella semitransparente no es confiable y producia falsos positivos que recortaban
+    # hombros de fotos normales. Decision: dejarlo desactivado.
 
     return img, ";".join(detalles), fondo_blanco_aplicado
 
@@ -414,74 +511,71 @@ def _jpeg_menor_a_limite(
     target_bytes: int,
     min_quality: int = 50,
     max_oversize_pct: float = 1.15,
+    preservar_calidad: bool = False,
+    max_dim: int = 600,
 ) -> tuple[bytes, str]:
     if target_bytes <= 0:
         raise RuntimeError("Limite de bytes invalido para foto")
 
     img = image.convert("RGB")
+
+    # Cap de resolucion: un carne no necesita >max_dim px de lado mayor. Reducir la
+    # resolucion (no la calidad) es lo que evita los bloques 8x8 de JPEG en camisa/fondo.
+    cap_detail = ""
+    lado_mayor = max(img.size)
+    if max_dim and lado_mayor > max_dim:
+        factor = max_dim / float(lado_mayor)
+        nuevo = (max(1, int(img.size[0] * factor)), max(1, int(img.size[1] * factor)))
+        img = img.resize(nuevo, Image.LANCZOS)
+        cap_detail = f"cap_{max_dim}px({nuevo[0]}x{nuevo[1]})"
+
     base_w, base_h = img.size
     allow_bytes = int(max(1, target_bytes * max_oversize_pct))
-    best_candidate: tuple[int, int, float, bytes] | None = None
 
-    quality_steps = tuple(range(95, min_quality - 1, -5))
-    if quality_steps[-1] != min_quality:
-        quality_steps += (min_quality,)
-    scale_steps = (1.0, 0.92, 0.85, 0.78, 0.72, 0.66, 0.60)
+    def _encode(im: Image.Image, quality: int, subsampling: int) -> bytes:
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=quality, optimize=True, progressive=True, subsampling=subsampling)
+        return buf.getvalue()
+
+    # Paso 0: maxima calidad sin submuestreo de croma (4:4:4).
+    hq_data = _encode(img, 95, 0)
+    if preservar_calidad:
+        return hq_data, f"jpeg_hq_preservado size={len(hq_data)} quality=95 scale=1.00 subsampling=0 {cap_detail}".strip()
+    if len(hq_data) <= target_bytes:
+        return hq_data, f"jpeg_hq_keep size={len(hq_data)} quality=95 scale=1.00 subsampling=0 {cap_detail}".strip()
+
+    # Escalera que PRIORIZA CALIDAD: reduce resolucion manteniendo calidad alta (piso 88)
+    # y croma plena (4:4:4). Asi un carne entra bajo el limite sin pixelado/bloques.
+    best_candidate: tuple[int, int, float, bytes] | None = None
+    scale_steps = (1.0, 0.92, 0.85, 0.78, 0.72, 0.65)
+    quality_steps = (95, 92, 90, 88)
 
     for scale in scale_steps:
-        w = max(240, int(base_w * scale))
-        h = max(320, int(base_h * scale))
-        resized = img.resize((w, h), Image.LANCZOS)
+        w = max(300, int(base_w * scale))
+        h = max(400, int(base_h * scale))
+        resized = img.resize((w, h), Image.LANCZOS) if scale != 1.0 else img
 
         for quality in quality_steps:
-            buffer = io.BytesIO()
-            resized.save(
-                buffer,
-                format="JPEG",
-                quality=quality,
-                optimize=True,
-                progressive=True,
-                subsampling=2,
-            )
-            data = buffer.getvalue()
+            data = _encode(resized, quality, 0)
             size = len(data)
-
             if size <= target_bytes:
-                detalle = f"jpeg_ok size={size} quality={quality} scale={scale:.2f}"
-                return data, detalle
-
-            if size <= allow_bytes:
-                if best_candidate is None or quality > best_candidate[1] or (
-                    quality == best_candidate[1] and size < best_candidate[0]
-                ):
-                    best_candidate = (size, quality, scale, data)
+                return data, f"jpeg_ok size={size} quality={quality} scale={scale:.2f} subsampling=0 {cap_detail}".strip()
+            if size <= allow_bytes and (best_candidate is None or quality > best_candidate[1]):
+                best_candidate = (size, quality, scale, data)
 
     if best_candidate is not None:
         size, quality, scale, data = best_candidate
-        detalle = f"jpeg_ok_oversize size={size} quality={quality} scale={scale:.2f} oversize_pct={size/target_bytes:.2f}"
-        return data, detalle
+        return data, f"jpeg_ok_oversize size={size} quality={quality} scale={scale:.2f} oversize_pct={size/target_bytes:.2f} {cap_detail}".strip()
 
-    # Segunda fase: solo si es estrictamente necesario intentamos versiones más agresivas,
-    # pero no bajamos de quality=30 para evitar resultados destrozados.
-    for scale in (0.50, 0.40, 0.32):
-        w = max(160, int(base_w * scale))
-        h = max(200, int(base_h * scale))
+    # Ultimo recurso: bajar calidad (y resolucion) mas agresivo, con piso min_quality.
+    for scale in (0.60, 0.50, 0.42):
+        w = max(260, int(base_w * scale))
+        h = max(340, int(base_h * scale))
         resized = img.resize((w, h), Image.LANCZOS)
-
-        for quality in (35, 30):
-            buffer = io.BytesIO()
-            resized.save(
-                buffer,
-                format="JPEG",
-                quality=quality,
-                optimize=True,
-                progressive=False,
-                subsampling=2,
-            )
-            data = buffer.getvalue()
+        for quality in (80, 70, 60, max(min_quality, 50)):
+            data = _encode(resized, quality, 2)
             if len(data) <= target_bytes:
-                detalle = f"jpeg_fallback_ok size={len(data)} quality={quality} scale={scale:.2f}"
-                return data, detalle
+                return data, f"jpeg_fallback_ok size={len(data)} quality={quality} scale={scale:.2f} {cap_detail}".strip()
 
     raise RuntimeError("No se pudo reducir foto por debajo del limite requerido")
 
@@ -513,6 +607,8 @@ def procesar_foto_carne_por_dni(
     overwrite_existing: bool,
     min_jpeg_quality: int,
     max_jpeg_oversize_pct: float,
+    save_original: bool = True,
+    max_dim: int = 600,
 ) -> dict:
     dni_digits = _normalizar_dni(dni)
     if not dni_digits:
@@ -535,7 +631,51 @@ def procesar_foto_carne_por_dni(
         }
 
     content, mime = _descargar_drive_bytes(file_id, credentials_path)
-    image = Image.open(io.BytesIO(content))
+
+    original_path = None
+    original_detail = "original_skip"
+    if save_original:
+        try:
+            original_path = guardar_original(
+                lote_dir,
+                dni_digits,
+                content,
+                mime,
+                prefix="foto_carne",
+                overwrite_existing=overwrite_existing,
+            )
+            original_detail = f"original_saved={original_path.name}"
+        except Exception as exc:
+            # No bloquear el tratamiento si falla guardar la original.
+            original_detail = f"original_error={exc}"
+
+    # HEIC/HEIF (fotos de iPhone, p.ej. extension .hec): PIL no las abre sin plugin.
+    # Registramos pillow-heif para abrirlas y convertirlas (la salida siempre es JPEG).
+    es_heic = _es_heic(content, mime)
+    heic_detail = ""
+    if es_heic:
+        disponible = _registrar_heif()
+        heic_detail = "heic_convertido" if disponible else "heic_sin_soporte"
+
+    try:
+        image = Image.open(io.BytesIO(content))
+        image.load()
+    except Exception as exc:
+        if es_heic:
+            return {
+                "status": "revision_manual",
+                "observation": f"{dni_digits} FOTO FORMATO HEIC, CONVERTIR/REVISAR",
+                "detail": f"mime={mime} {original_detail} {heic_detail} open_error={exc}",
+                "local_path": "",
+                "original_path": str(original_path) if original_path else "",
+            }
+        return {
+            "status": "error",
+            "observation": f"{dni_digits} IMAGEN NO VALIDA, REVISAR FUENTE",
+            "detail": f"mime={mime} {original_detail} open_error={exc}",
+            "local_path": "",
+            "original_path": str(original_path) if original_path else "",
+        }
 
     pre_img = image
     pre_detail = "preprocess_skip"
@@ -546,15 +686,27 @@ def procesar_foto_carne_por_dni(
         pre_detail = f"preprocess_error={exc}"
 
     target_bytes = max(1, int(max_kb * 1024 * headroom_pct))
-    out_jpg, detail = _jpeg_menor_a_limite(pre_img, target_bytes, min_quality=min_jpeg_quality, max_oversize_pct=max_jpeg_oversize_pct)
+    # Regla: si el archivo ORIGINAL ya pesa <= limite (~75KB), no se comprime ni
+    # redimensiona; solo se guarda a maxima calidad el resultado de recorte/fondo.
+    preservar_calidad = len(content) <= target_bytes
+    out_jpg, detail = _jpeg_menor_a_limite(
+        pre_img,
+        target_bytes,
+        min_quality=min_jpeg_quality,
+        max_oversize_pct=max_jpeg_oversize_pct,
+        preservar_calidad=preservar_calidad,
+        max_dim=max_dim,
+    )
     local_path = _guardar_foto_local(lote_dir, dni_digits, out_jpg, overwrite_existing)
 
-    detail_full = f"{pre_detail} {detail}".strip()
+    peso_detail = f"original_kb={len(content)/1024:.1f} preservado={preservar_calidad}"
+    detail_full = f"{heic_detail} {pre_detail} {peso_detail} {detail}".strip()
     observation = "DESCARGADO CON FONDO BLANCO" if fondo_blanco_aplicado else "DESCARGADO SIN OBSERVACIONES"
 
     return {
         "status": "ok",
         "observation": observation,
-        "detail": f"mime={mime} {detail_full}",
+        "detail": f"mime={mime} {original_detail} {detail_full}",
         "local_path": str(local_path),
+        "original_path": str(original_path) if original_path else "",
     }

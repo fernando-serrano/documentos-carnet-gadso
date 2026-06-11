@@ -233,7 +233,32 @@ Transiciones de estado durante el proceso:
 
 Salida local de Foto Carne:
 
-- `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/foto_carne_<dni>.jpg`
+- `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/foto_carne_<dni>.jpg` (tratada)
+- `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/foto_carne_<dni>_original.<ext>` (original de la fuente, sin tratar)
+
+### Original + tratada (Foto Carne)
+
+El expediente conserva **siempre la imagen original** descargada de la fuente, junto a la
+versión tratada. La original se guarda apenas se descarga (antes de procesar), de modo que
+queda disponible aunque el tratamiento falle o la foto vaya a `REVISAR MANUAL`.
+
+- `FOTO_CARNE_SAVE_ORIGINAL=1` (por defecto) activa el guardado de la original.
+- La extensión se deriva del tipo de archivo de Drive (jpg/png/...).
+
+### Deteccion de rostro y recorte (Foto Carne)
+
+El recorte 3x4 se centra en el rostro detectado **localmente con OpenCV (Haar Cascade)** —
+no se usa ningun servicio en la nube. Si no se detecta rostro confiable, se omite el recorte
+facial y se continua con el resto del tratamiento.
+
+Fondo: para fondos de estudio casi-blancos se aplica un **blanqueo conservador** que solo
+toca los pixeles del fondo conectados al borde, dejando al sujeto (saco, piel, pelo) intacto.
+Solo cuando el fondo es complejo se recurre a rembg (IA) y, como ultimo recurso, a GrabCut.
+
+Peso: `FOTO_CARNE_MAX_KB=79` x `HEADROOM 0.95` ~= **75 KB**. Si el original ya pesa menos que
+ese limite, **no se comprime ni redimensiona**: se guarda a maxima calidad (q95, croma 4:4:4).
+
+Estados de Foto Carne: `EN PROCESO W#` -> `DESCARGADO` / `SIN REGISTROS` / `ERROR`.
 
 ### Defaults del flujo Foto Carne
 
@@ -361,7 +386,12 @@ Transiciones de estado durante el proceso:
 
 Salida local de Firma Digital:
 
-- `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/firma_digital_<dni>.png`
+- `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/firma_digital_<dni>.png` (tratada)
+- `lotes/lote-DD-MM-YYYY-HH-MM-SS/<dni>/firma_digital_<dni>_original.<ext>` (original de la fuente, sin tratar)
+
+El expediente conserva **siempre la original** descargada de la fuente junto a la tratada,
+aunque la firma vaya a `REVISAR MANUAL`. Controlado por `FIRMA_DIGITAL_SAVE_ORIGINAL=1`
+(por defecto).
 
 Archivo temporal de trazabilidad (opcional):
 

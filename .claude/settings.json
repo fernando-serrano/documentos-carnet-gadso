@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($py = \".\\\\.venv\\\\Scripts\\\\python.exe\"; if \\(-not \\(Test-Path $py\\)\\) { $py = \"python\" }; & $py -c \"import flows.common.sheets as c; from flows.galenius_flow import sheets as g; from flows.photo_carne_flow import sheets as p; from flows.dj_fut_flow import sheets as d; from flows.firma_digital_flow import sheets as f; print\\('sheets OK'\\); print\\('public g:', sorted\\(x for x in dir\\(g\\) if not x.startswith\\('_'\\)\\)\\)\")",
+      "PowerShell($py = \".\\\\.venv\\\\Scripts\\\\python.exe\"; if \\(-not \\(Test-Path $py\\)\\) { $py = \"python\" }; & $py -c \"import importlib; [importlib.import_module\\(m\\) for m in ['flows.galenius_flow.main_flow','flows.photo_carne_flow.photo_flow','flows.dj_fut_flow.dj_fut_flow','flows.firma_digital_flow.firma_flow','run_galenius','run_foto_carne','run_dj_fut','run_firma_digital']]; print\\('ALL IMPORTS OK'\\)\")",
+      "Bash(tail -25 logs/galenius/galenius_flow_20260608_153253/galenius_flow.log)",
+      "Bash(tail -15 logs/galenius/galenius_flow_20260608_153253/events.jsonl)",
+      "PowerShell($py = \".\\\\.venv\\\\Scripts\\\\python.exe\"; if \\(-not \\(Test-Path $py\\)\\) { $py = \"python\" }; & $py tools\\\\debug\\\\_tmp_test_original.py)",
+      "PowerShell(Get-ExecutionPolicy -List)",
+      "PowerShell(& .\\\\.venv\\\\Scripts\\\\python.exe -c \"import ast; ast.parse\\(open\\(r'flows\\\\photo_carne_flow\\\\photo_flow.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK sintaxis'\\)\")",
+      "PowerShell(& .\\\\.venv\\\\Scripts\\\\python.exe -c \"import ast; [ast.parse\\(open\\(f, encoding='utf-8'\\).read\\(\\)\\) for f in ['run_foto_carne.py','run_dj_fut.py','run_firma_digital.py']]; print\\('OK sintaxis los 3'\\)\")",
+      "Bash(git rm *)",
+      "Bash(rm -f flows/common/vision.py tools/check_vision.py)",
+      "Bash(ls tools/check_vision.py)"
+    ]
+  }
+}

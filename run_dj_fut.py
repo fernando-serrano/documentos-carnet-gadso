@@ -350,7 +350,9 @@ def main() -> int:
         lote_dir,
     )
 
-    return 0 if errores == 0 else 1
+    # Errores por-registro NO son fatales: quedan marcados en la hoja y el log.
+    # Devolvemos 0 para que run.bat continue con Firma. Config fallida devuelve return 2.
+    return 0
 
 
 if __name__ == "__main__":

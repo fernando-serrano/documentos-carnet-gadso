@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0\..\.."
 
-python run_galenius.py
+.venv\Scripts\python.exe run_galenius.py
 set EXIT_CODE=%ERRORLEVEL%
 
 if not "%EXIT_CODE%"=="0" (
