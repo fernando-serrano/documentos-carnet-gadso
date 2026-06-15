@@ -341,12 +341,16 @@ def _worker_firma_digital(
                     resultado.get("observation", ""),
                     resultado.get("detail", ""),
                 )
+                obs_error = str(resultado.get("observation", "ERROR DE TRATAMIENTO FIRMA DIGITAL"))
+                detalle_error = str(resultado.get("detail", "")).strip()
+                if detalle_error:
+                    obs_error = f"{obs_error} | {detalle_error[:160]}"
                 _marcar_fila_firma_digital(
                     cfg,
                     fieldnames,
                     row_number,
                     cfg.estado_error,
-                    str(resultado.get("observation", "ERROR DE TRATAMIENTO FIRMA DIGITAL")),
+                    obs_error,
                     logger,
                 )
         except Exception as exc:
@@ -463,6 +467,14 @@ def main() -> int:
         errores,
         lote_dir,
     )
+    # Envio del lote por correo (omitido en modo orquestado run.bat all -> LOTE_MAIL_DEFER=1).
+    try:
+        from flows.notifications.enviar_lote import enviar_lote_post_run
+
+        enviar_lote_post_run(lote_dir, "firma_digital", logger)
+    except Exception as exc:
+        logger.warning("[FIRMA DIGITAL] No se pudo enviar el lote por correo: %s", exc)
+
     # Errores por-registro NO son fatales: quedan marcados en la hoja y el log.
     # Devolvemos 0 para no romper la cadena de run.bat. Config fallida devuelve return 2.
     return 0

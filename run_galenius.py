@@ -21,6 +21,16 @@ def main() -> int:
             resumen.get("errores", 0),
         )
         event_logger.event("run_finish", status="ok", **resumen)
+
+        # Envio del lote por correo (omitido en modo orquestado run.bat all -> LOTE_MAIL_DEFER=1).
+        lote_dir = resumen.get("lote_dir")
+        if lote_dir:
+            try:
+                from flows.notifications.enviar_lote import enviar_lote_post_run
+
+                enviar_lote_post_run(lote_dir, "galenius", logger)
+            except Exception as exc:
+                logger.warning("[GALENIUS] No se pudo enviar el lote por correo: %s", exc)
         return 0
     except GaleniusFlowError as exc:
         logger.error("[GALENIUS] Flujo fallido: %s", exc)

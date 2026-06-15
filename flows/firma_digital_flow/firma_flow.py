@@ -6,13 +6,81 @@ import threading
 import unicodedata
 from pathlib import Path
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
-from flows.common.utils import guardar_original
+from flows.common.utils import guardar_original, ext_desde_mime
 from .sheets import read_google_sheet_rows
 
 
 _thread_local = threading.local()
+
+
+def _leer_params_firma() -> dict:
+    """Parametros del tratamiento de firma, configurables por env (con defaults/clamps)."""
+    params = getattr(_thread_local, "firma_params", None)
+    if params is not None:
+        return params
+
+    def _f(name, d, lo, hi):
+        try:
+            v = float(str(os.getenv(name, d)).strip())
+        except Exception:
+            v = float(d)
+        return max(lo, min(hi, v))
+
+    def _i(name, d, lo, hi):
+        try:
+            v = int(str(os.getenv(name, d)).strip())
+        except Exception:
+            v = int(d)
+        return max(lo, min(hi, v))
+
+    def _b(name, d):
+        return str(os.getenv(name, d)).strip().lower() in ("1", "true", "si", "sí", "yes", "y", "on")
+
+    def _s(name, d):
+        return str(os.getenv(name, d)).strip().lower()
+
+    params = {
+        "deskew": _b("FIRMA_DIGITAL_DESKEW", "1"),
+        "deskew_min_angle": _f("FIRMA_DIGITAL_DESKEW_MIN_ANGLE", "7", 1.0, 45.0),
+        "deskew_max_angle": _f("FIRMA_DIGITAL_DESKEW_MAX_ANGLE", "25", 10.0, 60.0),
+        "deskew_min_aspect": _f("FIRMA_DIGITAL_DESKEW_MIN_ASPECT", "1.6", 1.0, 6.0),
+        "thicken": _b("FIRMA_DIGITAL_THICKEN", "1"),
+        # Intensidad del engrosado de firmas tenues: off|soft|normal. 'soft' = solo cierra
+        # micro-cortes sin ensanchar; 'normal' = dilata levemente las muy tenues.
+        "thicken_strength": _s("FIRMA_DIGITAL_THICKEN_STRENGTH", "soft"),
+        "noise_min_area_ratio": _f("FIRMA_DIGITAL_NOISE_MIN_AREA_RATIO", "0.00006", 0.0, 0.01),
+        "cluster_link_pct": _f("FIRMA_DIGITAL_CLUSTER_LINK_PCT", "0.07", 0.02, 0.20),
+        "adaptive_constant": _i("FIRMA_DIGITAL_ADAPTIVE_CONSTANT", "10", 2, 30),
+        # --- Reconstruccion fiel del trazo (flat-field + relleno de huecos) ---
+        # Canal base de tinta: 'red' separa mejor la tinta azul/violeta del papel; 'gray' = luminancia.
+        "ink_channel": _s("FIRMA_DIGITAL_INK_CHANNEL", "red"),
+        # Correccion de iluminacion (flat-field) para permitir un Otsu global limpio (sin huecos).
+        "flatfield": _b("FIRMA_DIGITAL_FLATFIELD", "1"),
+        # Divisor del lado menor de la imagen para el kernel del boxFilter (mayor divisor = kernel menor).
+        "flatfield_kernel_div": _i("FIRMA_DIGITAL_FLATFIELD_KERNEL_DIV", "7", 3, 30),
+        # Sensibilidad del umbral: offset sobre Otsu para captar TINTA TENUE (cierra
+        # discontinuidades en el origen). Mayor = mas tinta tenue (mas continuo, mas riesgo de ruido).
+        "ink_sensitivity": _i("FIRMA_DIGITAL_INK_SENSITIVITY", "12", 0, 60),
+        # Iteraciones de MORPH_CLOSE. 0 (default) = NO fusionar lazos angostos; la continuidad la
+        # da el umbral sensible. Subir solo si se necesita puentear gaps grandes (riesgo: fusion).
+        "close_iter": _i("FIRMA_DIGITAL_CLOSE_ITER", "0", 0, 4),
+        # Tope de area SECUNDARIO de hueco a rellenar (fraccion del AREA DE TINTA).
+        "fill_hole_max_ratio": _f("FIRMA_DIGITAL_FILL_HOLE_MAX_RATIO", "0.01", 0.0, 0.30),
+        # Discriminante de GROSOR: un hueco se rellena solo si es DELGADO (grosor <= grosor_trazo*factor).
+        "fill_thick_factor": _f("FIRMA_DIGITAL_FILL_THICK_FACTOR", "1.3", 0.5, 4.0),
+        # Discriminante de ELONGACION: rellenar solo huecos ALARGADOS (estrias: area/grosor^2 >= min).
+        # Un lazo redondo tiene elong ~1 -> NUNCA se rellena. Subir = mas conservador.
+        "fill_elong_min": _f("FIRMA_DIGITAL_FILL_ELONG_MIN", "3.0", 1.0, 12.0),
+        # Lado menor minimo para procesar: si la foto es mas pequena se upscalea (cubica) para que
+        # los trazos finos no se fragmenten en la morfologia. 0 = no upscalear.
+        "min_process_dim": _i("FIRMA_DIGITAL_MIN_PROCESS_DIM", "600", 0, 2000),
+        # Anti-aliasing cosmetico de bordes en el render (suaviza el dentado). 1=on, 0=off.
+        "antialias": _b("FIRMA_DIGITAL_ANTIALIAS", "1"),
+    }
+    _thread_local.firma_params = params
+    return params
 
 
 def _normalizar_texto(texto: str) -> str:
@@ -34,6 +102,21 @@ def _resolver_columna(fieldnames: list[str], candidatos: list[str]) -> str:
         if key in normalizados:
             return normalizados[key]
     return ""
+
+
+def _parse_marca_temporal(value: str) -> tuple:
+    """Convierte la 'Marca temporal' de Google Forms ('D/M/YYYY H:M:S') en una tupla comparable
+    (Y, M, D, h, m, s). Si no se puede parsear, devuelve ceros (gana el orden de fila)."""
+    s = str(value or "").strip()
+    if not s:
+        return (0, 0, 0, 0, 0, 0)
+    try:
+        fecha, _, hora = s.partition(" ")
+        d, m, y = (int(x) for x in fecha.split("/")[:3])
+        h, mi, se = (int(x) for x in (hora.split(":") + ["0", "0", "0"])[:3])
+        return (y, m, d, h, mi, se)
+    except Exception:
+        return (0, 0, 0, 0, 0, 0)
 
 
 def cargar_fuente_firma_por_dni(sheet_url: str, logger) -> dict[str, str]:
@@ -58,36 +141,46 @@ def cargar_fuente_firma_por_dni(sheet_url: str, logger) -> dict[str, str]:
     if not firma_col:
         raise RuntimeError("No se encontro columna 'Cargar Firma Digital' o equivalente en hoja base")
 
-    resultado: dict[str, str] = {}
-    duplicados: dict[str, set[str]] = {}
+    ts_col = _resolver_columna(
+        fieldnames,
+        ["marca temporal", "marca de tiempo", "timestamp", "fecha y hora", "fecha de envio", "fecha"],
+    )
+
+    # Si un DNI tiene varias firmas (filas distintas), se queda la de MARCA TEMPORAL mas reciente.
+    # Desempate: la fila mas abajo (envio mas nuevo). Asi NO va a revision manual por duplicado.
+    mejores: dict[str, tuple] = {}  # dni -> (sort_key, url)
+    dnis_multi: set[str] = set()
     for row in rows:
         dni = _normalizar_dni(row.get(dni_col, ""))
         raw_url = str(row.get(firma_col, "") or "").strip()
         if not dni or not raw_url:
             continue
+        rn = int(row.get("__row_number__", 0) or 0)
+        ts_key = _parse_marca_temporal(row.get(ts_col, "")) if ts_col else (0, 0, 0, 0, 0, 0)
+        sort_key = (ts_key, rn)
+        actual = mejores.get(dni)
+        if actual is None:
+            mejores[dni] = (sort_key, raw_url)
+        else:
+            if actual[1] != raw_url:
+                dnis_multi.add(dni)
+            if sort_key > actual[0]:
+                mejores[dni] = (sort_key, raw_url)
 
-        if dni in resultado and resultado[dni] != raw_url:
-            prev = resultado[dni]
-            if not str(prev).startswith("__MULTIPLE__"):
-                duplicados.setdefault(dni, set()).add(prev)
-            duplicados.setdefault(dni, set()).add(raw_url)
-            resultado[dni] = "__MULTIPLE__"
-            continue
+    resultado: dict[str, str] = {dni: v[1] for dni, v in mejores.items()}
 
-        if str(resultado.get(dni, "")).startswith("__MULTIPLE__"):
-            duplicados.setdefault(dni, set()).add(raw_url)
-            continue
-
-        resultado[dni] = raw_url
-
-    if duplicados and hasattr(logger, "warning"):
+    if dnis_multi and hasattr(logger, "warning"):
         logger.warning(
-            "[FIRMA DIGITAL] DNIs con multiples firmas en fuente | cantidad=%s | ejemplo=%s",
-            len(duplicados),
-            next(iter(duplicados.keys())),
+            "[FIRMA DIGITAL] DNIs con multiples firmas | se tomo la mas reciente (Marca temporal) | cantidad=%s | col_ts=%s | ejemplo=%s",
+            len(dnis_multi),
+            ts_col or "(no encontrada)",
+            next(iter(dnis_multi)),
         )
 
-    logger.info("[FIRMA DIGITAL] Fuente cargada | filas=%s | dni_con_firma=%s", len(rows), len(resultado))
+    logger.info(
+        "[FIRMA DIGITAL] Fuente cargada | filas=%s | dni_con_firma=%s | col_ts=%s",
+        len(rows), len(resultado), ts_col or "(no)",
+    )
     return resultado
 
 
@@ -173,31 +266,139 @@ def _abrir_imagen_procesable(content: bytes) -> Image.Image:
     except Exception as exc:
         raise RuntimeError(f"no se pudo abrir imagen: {exc}") from exc
 
-    # Importante: no rotar en ningun caso.
+    # Respetar la orientacion EXIF del celular: la foto trae grabado como va rotada
+    # (p.ej. orientation=6 -> 90 CW). Es la fuente MAS confiable para enderezar fotos de
+    # firma tomadas de costado (no hay que adivinar con PCA).
+    try:
+        image = ImageOps.exif_transpose(image)
+    except Exception:
+        pass
     return image.convert("RGB")
 
 
-def _generar_mascara_firma(gray, cv2_mod, np_mod):
-    blur = cv2_mod.GaussianBlur(gray, (5, 5), 0)
-    _, mask_otsu = cv2_mod.threshold(blur, 0, 255, cv2_mod.THRESH_BINARY_INV + cv2_mod.THRESH_OTSU)
-    mask_adapt = cv2_mod.adaptiveThreshold(
-        blur,
-        255,
-        cv2_mod.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2_mod.THRESH_BINARY_INV,
-        31,
-        12,
-    )
+def _canal_tinta(arr_rgb, gray, np_mod, params):
+    """Canal base para separar tinta de papel. El canal ROJO da el mejor contraste
+    para tinta azul/violeta (la mas comun en firmas); para tinta negra ~= gris."""
+    if str(params.get("ink_channel", "red")) == "gray" or arr_rgb is None:
+        return gray
+    try:
+        # arr_rgb viene en orden RGB (PIL.convert("RGB")) -> canal 0 = rojo.
+        canal = np_mod.ascontiguousarray(arr_rgb[:, :, 0])
+        return canal
+    except Exception:
+        return gray
 
-    mask = cv2_mod.bitwise_or(mask_otsu, mask_adapt)
+
+def _generar_mascara_firma(arr_rgb, gray, cv2_mod, np_mod, params=None):
+    """Genera la mascara del trazo SIN huecos.
+
+    Antes se usaba ``bitwise_or(Otsu, adaptativo)``: el umbral adaptativo solo detecta
+    los BORDES de un trazo mas ancho que su bloque local -> trazo CONTORNEADO (hueco por
+    dentro). Ahora: canal de tinta (rojo) -> correccion de iluminacion flat-field -> Otsu
+    GLOBAL, que rellena el trazo solido. Basado en tests/manual/firma.py.
+    """
+    params = params or _leer_params_firma()
+
+    base = _canal_tinta(arr_rgb, gray, np_mod, params)
+
+    if params.get("flatfield", True):
+        h, w = base.shape[:2]
+        # Kernel impar, proporcional al lado menor: estima la iluminacion del papel
+        # (sombras/gradientes) sin "ver" el trazo, para normalizarlo con divide.
+        div = int(params.get("flatfield_kernel_div", 7)) or 7
+        k = max(31, (min(h, w) // div))
+        if k % 2 == 0:
+            k += 1
+        fondo = cv2_mod.boxFilter(base, -1, (k, k))
+        base = cv2_mod.divide(base, fondo, scale=255)
+        detalle_ff = f"flatfield_k={k}"
+    else:
+        base = cv2_mod.GaussianBlur(base, (3, 3), 0)
+        detalle_ff = "flatfield_off"
+
+    # Otsu GLOBAL sobre el canal aplanado -> tinta FUERTE (confiable), trazo solido.
+    otsu_t, mask = cv2_mod.threshold(base, 0, 255, cv2_mod.THRESH_BINARY_INV + cv2_mod.THRESH_OTSU)
+
+    # Umbral por HISTeRESIS para CONTINUIDAD: el papel aplanado queda ~255 y la tinta mas oscura.
+    # Tomamos tinta TENUE (umbral Otsu+offset) pero conservamos SOLO los componentes que tocan
+    # tinta fuerte -> extiende/une trazos reales y DESCARTA motas sueltas del papel (sin ruido).
+    sens = int(params.get("ink_sensitivity", 22))
+    if sens > 0:
+        t2 = float(min(245.0, float(otsu_t) + float(sens)))
+        _, weak = cv2_mod.threshold(base, t2, 255, cv2_mod.THRESH_BINARY_INV)
+        num, lbl, _st, _c = cv2_mod.connectedComponentsWithStats(weak, connectivity=8)
+        if num > 1:
+            strong_labels = np_mod.unique(lbl[mask > 0])
+            keep = np_mod.zeros(num, dtype=bool)
+            keep[strong_labels[strong_labels > 0]] = True
+            mask = (keep[lbl].astype(np_mod.uint8)) * 255
+        detalle_ff = f"{detalle_ff} hyst_sens={sens} t={t2:.0f}"
     fg_ratio = float(np_mod.count_nonzero(mask)) / float(max(1, mask.size))
 
-    # Si la mascara toma casi toda la imagen, usamos una opcion mas conservadora.
-    if fg_ratio > 0.65:
-        mask = mask_otsu
-        fg_ratio = float(np_mod.count_nonzero(mask)) / float(max(1, mask.size))
+    return mask, f"mask_fg_ratio={fg_ratio:.4f} {detalle_ff}"
 
-    return mask, f"mask_fg_ratio={fg_ratio:.4f}"
+
+def _rellenar_trazo(mask, cv2_mod, np_mod, params=None):
+    """Reconstruccion FIEL del trazo (sin IA generativa):
+    1) MORPH_CLOSE puentea trazos intermitentes (gaps pequenos del lapicero).
+    2) Rellena SOLO huecos pequenos ENCERRADOS (los pinholes del trazo), dejando los
+       lazos legitimos abiertos. El umbral es relativo al AREA DEL TRAZO (no de la foto),
+       y una guarda anti-blob revierte el relleno si engordaria demasiado (un lazo grande)."""
+    params = params or _leer_params_firma()
+    h, w = mask.shape[:2]
+    detalles = []
+
+    close_iter = int(params.get("close_iter", 1))
+    if close_iter > 0:
+        kernel = cv2_mod.getStructuringElement(cv2_mod.MORPH_ELLIPSE, (3, 3))
+        mask = cv2_mod.morphologyEx(mask, cv2_mod.MORPH_CLOSE, kernel, iterations=close_iter)
+        detalles.append(f"close_iter={close_iter}")
+
+    frac = float(params.get("fill_hole_max_ratio", 0.01))
+    factor = float(params.get("fill_thick_factor", 1.3))
+    elong_min = float(params.get("fill_elong_min", 3.0))
+    fg0 = int(np_mod.count_nonzero(mask))
+    if frac > 0 and fg0 > 0:
+        # Tope de area SECUNDARIO (auto-escala al tamano de la firma).
+        area_thresh = max(8, int(frac * fg0))
+        # Grosor del TRAZO: 2x el percentil 75 de la distancia al fondo dentro de la tinta.
+        dt_fg = cv2_mod.distanceTransform(mask, cv2_mod.DIST_L2, 3)
+        vals = dt_fg[dt_fg > 0]
+        w_trazo = 2.0 * float(np_mod.percentile(vals, 75)) if vals.size else 2.0
+        max_grosor = max(2.0, w_trazo * factor)
+        # Huecos = componentes de FONDO que NO tocan el borde (regiones encerradas por tinta).
+        inv = cv2_mod.bitwise_not(mask)
+        num, lbl, stats, _c = cv2_mod.connectedComponentsWithStats(inv, connectivity=8)
+        # Grosor de cada hueco = 2x la distancia maxima al borde de tinta dentro del hueco.
+        dt_hole = cv2_mod.distanceTransform(inv, cv2_mod.DIST_L2, 3)
+        relleno = mask.copy()
+        llenos = 0
+        for i in range(1, num):
+            x = int(stats[i, cv2_mod.CC_STAT_LEFT]); y = int(stats[i, cv2_mod.CC_STAT_TOP])
+            ww = int(stats[i, cv2_mod.CC_STAT_WIDTH]); hh = int(stats[i, cv2_mod.CC_STAT_HEIGHT])
+            area = int(stats[i, cv2_mod.CC_STAT_AREA])
+            toca_borde = x <= 0 or y <= 0 or (x + ww) >= w or (y + hh) >= h
+            if toca_borde or area > area_thresh:
+                continue
+            # Grosor del hueco: si supera el del trazo*factor es un LAZO REDONDO -> no rellenar.
+            grosor_hueco = 2.0 * float(dt_hole[lbl == i].max())
+            if grosor_hueco > max_grosor:
+                continue
+            # Elongacion (area/grosor^2): una ESTRIA es alargada (>=elong_min); un LAZO redondo ~1.
+            elong = float(area) / max(1.0, grosor_hueco * grosor_hueco)
+            if elong >= elong_min:
+                relleno[lbl == i] = 255
+                llenos += area
+        # Guarda anti-blob global: si aun asi engorda el trazo > 8%, revertir.
+        if llenos > 0 and llenos <= int(0.08 * fg0):
+            mask = relleno
+            detalles.append(f"holes_filled_px={llenos} w_trazo={w_trazo:.1f} max_grosor={max_grosor:.1f}")
+        elif llenos > 0:
+            detalles.append(f"fill_revert_blob_guard would_add={llenos}")
+        else:
+            detalles.append("holes_filled_px=0")
+
+    return mask, " ".join(detalles) if detalles else "fill_none"
 
 
 def _limpiar_ruido_conservador(mask, cv2_mod, np_mod):
@@ -296,8 +497,10 @@ def _filtrar_cluster_principal_firma(mask, cv2_mod, np_mod):
             parent[rb] = ra
 
     diag = float((w * w + h * h) ** 0.5)
-    # Distancia de enlace mas estricta para evitar unir ruido lejano en bandas.
-    link_dist = max(10.0, diag * 0.055)
+    # Distancia de enlace configurable: mayor (~7%) recupera partes desconectadas legitimas
+    # (puntos, cortes de la firma) sin perderlas. La banda de ruido lejano se quita aparte.
+    link_pct = float(_leer_params_firma()["cluster_link_pct"])
+    link_dist = max(10.0, diag * link_pct)
     margin = max(4.0, float(max(w, h) * 0.015))
 
     for i in range(n):
@@ -393,6 +596,122 @@ def _filtrar_cluster_principal_firma(mask, cv2_mod, np_mod):
     if removed <= 0:
         return mask, "cluster_filter_not_needed"
     return cleaned, f"cluster_filter_kept={len(keep_labels)} removed={removed}"
+
+
+def _quitar_motas_lejanas(mask, cv2_mod, np_mod, params):
+    """Elimina motas pequeñas y AISLADAS (bandas de ruido del papel) lejos del trazo
+    principal. Conserva el componente mayor (firma) y todo lo cercano/elongado."""
+    h, w = mask.shape[:2]
+    num, labels, stats, _cent = cv2_mod.connectedComponentsWithStats(mask, connectivity=8)
+    if num <= 2:
+        return mask, "motas_none"
+
+    areas = stats[1:, cv2_mod.CC_STAT_AREA]
+    main = 1 + int(np_mod.argmax(areas))
+    mx0 = int(stats[main, cv2_mod.CC_STAT_LEFT])
+    my0 = int(stats[main, cv2_mod.CC_STAT_TOP])
+    mx1 = mx0 + int(stats[main, cv2_mod.CC_STAT_WIDTH])
+    my1 = my0 + int(stats[main, cv2_mod.CC_STAT_HEIGHT])
+
+    diag = float((w * w + h * h) ** 0.5)
+    noise_area = max(8, int(float(params["noise_min_area_ratio"]) * h * w))
+    margin = diag * 0.04
+
+    out = mask.copy()
+    removed = 0
+    for i in range(1, num):
+        if i == main:
+            continue
+        x = int(stats[i, cv2_mod.CC_STAT_LEFT])
+        y = int(stats[i, cv2_mod.CC_STAT_TOP])
+        ww = int(stats[i, cv2_mod.CC_STAT_WIDTH])
+        hh = int(stats[i, cv2_mod.CC_STAT_HEIGHT])
+        area = int(stats[i, cv2_mod.CC_STAT_AREA])
+        # distancia del bbox del componente al bbox del trazo principal
+        dx = max(0, mx0 - (x + ww), x - mx1)
+        dy = max(0, my0 - (y + hh), y - my1)
+        dist = float((dx * dx + dy * dy) ** 0.5)
+        # mota = pequeña Y lejos del trazo principal -> ruido del papel
+        if area < noise_area and dist > margin:
+            out[labels == i] = 0
+            removed += 1
+
+    if removed == 0:
+        return mask, "motas_none"
+    return out, f"motas_removidas={removed}"
+
+
+def _enderezar_firma(gray, mask, cv2_mod, np_mod, params):
+    """Deskew con guardas: endereza a horizontal SOLO si la firma es claramente elongada
+    y el angulo es significativo. Devuelve (gray, mask, detalle, roto, incierto)."""
+    if not params.get("deskew", True):
+        return gray, mask, "deskew_off", False, False
+
+    ys, xs = np_mod.where(mask > 0)
+    if xs.size < 60:
+        return gray, mask, "deskew_skip_pocos_puntos", False, False
+
+    # Orientacion actual: una firma normal es apaisada (mas ancha que alta). Si el bbox de la
+    # tinta es claramente VERTICAL (portrait), la firma esta rotada ~90 -> hay que enderezar.
+    bw0 = int(xs.max() - xs.min() + 1)
+    bh0 = int(ys.max() - ys.min() + 1)
+    portrait = bh0 > bw0 * 1.15
+
+    pts = np_mod.column_stack([xs.astype(np_mod.float32), ys.astype(np_mod.float32)])
+    try:
+        _mean, eigvecs, eigvals = cv2_mod.PCACompute2(pts, mean=None)
+    except Exception as exc:
+        return gray, mask, f"deskew_skip_pca_error={exc}", False, False
+
+    evs = np_mod.asarray(eigvals).ravel()
+    ev0 = float(evs[0]); ev1 = float(evs[1])
+    elong = float((ev0 / max(1e-6, ev1)) ** 0.5)
+    vx = float(eigvecs[0][0]); vy = float(eigvecs[0][1])
+    ang = float(np_mod.degrees(np_mod.arctan2(vy, vx)))
+    while ang > 90.0:
+        ang -= 180.0
+    while ang <= -90.0:
+        ang += 180.0
+    rot = -ang  # rotar para llevar el eje principal a horizontal
+
+    # MODO CONSERVADOR. Solo se corrige la INCLINACION LEVE de firmas apaisadas, donde el
+    # angulo de PCA es confiable (datos: rot<=~25). Una firma freeform rotada ~90 (portrait)
+    # no se puede enderezar con confianza -> REVISAR MANUAL. Apaisada con angulo grande (PCA
+    # poco fiable) -> se deja como esta (no arriesgar).
+    # La orientacion REAL ya la resolvio EXIF al abrir. Aqui solo corregimos inclinacion LEVE
+    # confiable (slight skew). NO se manda a revision por orientacion: si no se puede enderezar
+    # con confianza, se PROCESA como esta (intentar tratar, no descartar). Un angulo grande con
+    # EXIF normal suele ser el slant natural de la firma, no un error.
+    max_ang = float(params["deskew_max_angle"])
+    if abs(rot) < float(params["deskew_min_angle"]):
+        return gray, mask, f"deskew_skip_recta ang={rot:.1f}", False, False
+    if portrait or abs(rot) > max_ang or elong < float(params["deskew_min_aspect"]):
+        # No es una correccion de inclinacion leve confiable -> se deja como esta y se procesa.
+        return gray, mask, f"deskew_skip_no_confiable elong={elong:.2f} rot={rot:.0f} portrait={portrait}", False, False
+
+    h, w = gray.shape[:2]
+    cx, cy = w / 2.0, h / 2.0
+    M = cv2_mod.getRotationMatrix2D((cx, cy), rot, 1.0)
+    cos = abs(float(M[0, 0])); sin = abs(float(M[0, 1]))
+    nw = int(h * sin + w * cos)
+    nh = int(h * cos + w * sin)
+    M[0, 2] += nw / 2.0 - cx
+    M[1, 2] += nh / 2.0 - cy
+    gray_r = cv2_mod.warpAffine(gray, M, (nw, nh), flags=cv2_mod.INTER_LINEAR, borderValue=255)
+    mask_r = cv2_mod.warpAffine(mask, M, (nw, nh), flags=cv2_mod.INTER_NEAREST, borderValue=0)
+
+    # Sanity ESTRICTO: tras enderezar, la firma debe quedar CLARAMENTE apaisada (linea base
+    # horizontal). Si no (p.ej. quedo en diagonal), el angulo no era confiable -> REVISAR MANUAL.
+    ys2, xs2 = np_mod.where(mask_r > 0)
+    if xs2.size == 0:
+        return gray, mask, "deskew_incierto_vacio", False, True
+    bw = int(xs2.max() - xs2.min() + 1)
+    bh = int(ys2.max() - ys2.min() + 1)
+    # Si rotar empeoro (quedo mas alto que ancho), revertir y PROCESAR como estaba (no revision).
+    if bw < bh * 0.7:
+        return gray, mask, f"deskew_revert bw={bw} bh={bh}", False, False
+
+    return gray_r, mask_r, f"deskew_aplicado ang={rot:.1f} elong={elong:.2f}", True, False
 
 
 def _detectar_no_firma_morfologica(mask, cv2_mod, np_mod):
@@ -549,29 +868,35 @@ def _mascara_por_tinta_color(arr_rgb, gray, cv2_mod, np_mod):
     return mask
 
 
-def _engrosar_si_tenue(mask, cv2_mod, np_mod):
+def _engrosar_si_tenue(mask, cv2_mod, np_mod, params=None):
+    params = params or _leer_params_firma()
+    if not params.get("thicken", True):
+        return mask, "stroke_thickness_disabled", False
+
+    strength = str(params.get("thicken_strength", "soft")).lower()
+    if strength == "off":
+        return mask, "stroke_thickness_off", False
+
     h, w = mask.shape[:2]
     fg_ratio = float(np_mod.count_nonzero(mask)) / float(max(1, h * w))
+    kernel = cv2_mod.getStructuringElement(cv2_mod.MORPH_ELLIPSE, (2, 2))
+    # Guarda de sobre-crecimiento mas estricta (sutil): 1.04 en vez de 1.08.
+    overgrow = 1.04
 
-    # Engrosado aun mas conservador para evitar firmas "infladas".
-    if fg_ratio < 0.0012:
-        kernel = cv2_mod.getStructuringElement(cv2_mod.MORPH_ELLIPSE, (2, 2))
-        out = cv2_mod.dilate(mask, kernel, iterations=1)
+    def _aplicar(out, etiqueta):
         fg_before = float(np_mod.count_nonzero(mask))
         fg_after = float(np_mod.count_nonzero(out))
-        if fg_before > 0 and (fg_after / fg_before) > 1.08:
+        if fg_before > 0 and (fg_after / fg_before) > overgrow:
             return mask, "stroke_thickness_kept_overgrow_guard", False
-        return out, "stroke_thickened_soft", True
+        return out, etiqueta, True
 
+    # 'normal': dilata levemente las MUY tenues; 'soft' (default): nunca dilata, solo cierra.
+    if fg_ratio < 0.0012 and strength == "normal":
+        return _aplicar(cv2_mod.dilate(mask, kernel, iterations=1), "stroke_thickened_soft")
+
+    # Cierre de micro-cortes (net-neutro en ancho del trazo) para firmas tenues.
     if fg_ratio < 0.0030:
-        kernel = cv2_mod.getStructuringElement(cv2_mod.MORPH_ELLIPSE, (2, 2))
-        out = cv2_mod.morphologyEx(mask, cv2_mod.MORPH_CLOSE, kernel, iterations=1)
-        # Si el cierre añade demasiada masa, se descarta por fidelidad.
-        fg_before = float(np_mod.count_nonzero(mask))
-        fg_after = float(np_mod.count_nonzero(out))
-        if fg_before > 0 and (fg_after / fg_before) > 1.08:
-            return mask, "stroke_thickness_kept_overgrow_guard", False
-        return out, "stroke_thickened_micro", True
+        return _aplicar(cv2_mod.morphologyEx(mask, cv2_mod.MORPH_CLOSE, kernel, iterations=1), "stroke_thickened_micro")
 
     return mask, "stroke_thickness_kept", False
 
@@ -606,7 +931,8 @@ def _recortar_firma(gray, mask, cv2_mod, np_mod):
     return gray_crop, mask_crop
 
 
-def _render_firma_en_fondo_claro(gray_crop, mask_crop, cv2_mod, np_mod):
+def _render_firma_en_fondo_claro(gray_crop, mask_crop, cv2_mod, np_mod, params=None):
+    params = params or _leer_params_firma()
     # Quita motas de un pixel que suelen aparecer como ruido suelto.
     num_labels, labels, stats, _ = cv2_mod.connectedComponentsWithStats(mask_crop, connectivity=8)
     mask_render = mask_crop.copy()
@@ -627,9 +953,15 @@ def _render_firma_en_fondo_claro(gray_crop, mask_crop, cv2_mod, np_mod):
         if 0.82 <= keep_ratio <= 0.98:
             mask_render = thin
 
-    # Fondo blanco + trazo casi binario para evitar halos y pixeles grises dispersos.
-    out = np_mod.full(gray_crop.shape, 255, dtype=np_mod.uint8)
-    out[mask_render > 0] = 26
+    # Trazo sobre fondo blanco. Con anti-aliasing: el borde de la mascara se difumina y se compone
+    # tinta(26) sobre blanco(255) via alpha -> contorno suave (sin dentado), sin inventar tinta.
+    ink = 26
+    if params.get("antialias", True):
+        alpha = cv2_mod.GaussianBlur(mask_render, (3, 3), 0).astype(np_mod.float32) / 255.0
+        out = (255.0 - alpha * (255.0 - ink)).clip(0, 255).astype(np_mod.uint8)
+    else:
+        out = np_mod.full(gray_crop.shape, 255, dtype=np_mod.uint8)
+        out[mask_render > 0] = ink
 
     frame = max(8, int(max(out.shape[0], out.shape[1]) * 0.05))
     out = cv2_mod.copyMakeBorder(out, frame, frame, frame, frame, cv2_mod.BORDER_CONSTANT, value=255)
@@ -670,7 +1002,11 @@ def _detectar_firma_fragmentada(mask_crop, cv2_mod, np_mod):
     return False, "fragmentation_ok"
 
 
-def _intentar_rescate_alt(arr_rgb, gray, base_detail: str, cv2_mod, np_mod):
+def _intentar_rescate_alt(arr_rgb, gray, base_detail: str, cv2_mod, np_mod, params=None):
+    params = params or _leer_params_firma()
+    # Recomputar gray del original para asegurar orientacion no-rotada (alinea con arr_rgb).
+    gray = cv2_mod.cvtColor(arr_rgb, cv2_mod.COLOR_RGB2GRAY)
+
     mask_alt = _mascara_por_tinta_color(arr_rgb, gray, cv2_mod, np_mod)
     alt_ratio = float(np_mod.count_nonzero(mask_alt)) / float(max(1, mask_alt.size))
     if alt_ratio < 0.0005:
@@ -679,6 +1015,10 @@ def _intentar_rescate_alt(arr_rgb, gray, base_detail: str, cv2_mod, np_mod):
     mask_alt, alt_clean_detail = _limpiar_ruido_conservador(mask_alt, cv2_mod, np_mod)
     mask_alt, alt_border_detail = _suprimir_artefactos_de_borde(mask_alt, cv2_mod, np_mod)
     mask_alt, alt_cluster_detail = _filtrar_cluster_principal_firma(mask_alt, cv2_mod, np_mod)
+    # Mismas mejoras que el path principal: quitar motas de ruido lejanas + reconstruir trazo.
+    mask_alt, alt_motas_detail = _quitar_motas_lejanas(mask_alt, cv2_mod, np_mod, params)
+    mask_alt, alt_fill_detail = _rellenar_trazo(mask_alt, cv2_mod, np_mod, params)
+    alt_cluster_detail = f"{alt_cluster_detail} {alt_motas_detail} {alt_fill_detail}"
 
     non_signature_alt, non_sig_alt_detail = _detectar_no_firma_morfologica(mask_alt, cv2_mod, np_mod)
     if non_signature_alt:
@@ -692,7 +1032,19 @@ def _intentar_rescate_alt(arr_rgb, gray, base_detail: str, cv2_mod, np_mod):
             False,
         )
 
-    mask_alt_final, alt_thick_detail, alt_thickened = _engrosar_si_tenue(mask_alt, cv2_mod, np_mod)
+    # Deskew tambien en el rescate; si queda incierto -> caller manda a REVISAR MANUAL.
+    gray, mask_alt, alt_deskew_detail, _alt_roto, alt_deskew_incierto = _enderezar_firma(
+        gray, mask_alt, cv2_mod, np_mod, params
+    )
+    if alt_deskew_incierto:
+        return (
+            False,
+            None,
+            f"{base_detail} alt_ink_rescue {alt_deskew_detail} deskew_revision_manual",
+            False,
+        )
+
+    mask_alt_final, alt_thick_detail, alt_thickened = _engrosar_si_tenue(mask_alt, cv2_mod, np_mod, params)
 
     try:
         gray_crop_alt, mask_crop_alt = _recortar_firma(gray, mask_alt_final, cv2_mod, np_mod)
@@ -732,11 +1084,25 @@ def _intentar_rescate_alt(arr_rgb, gray, base_detail: str, cv2_mod, np_mod):
             alt_thickened,
         )
 
-    out_alt = _render_firma_en_fondo_claro(gray_crop_alt, mask_crop_alt, cv2_mod, np_mod)
+    # Blob denso (sombra/contaminacion) tambien en el rescate -> falla -> caller a revision.
+    ys_b, xs_b = np_mod.where(mask_crop_alt > 0)
+    if xs_b.size > 0:
+        bw_b = int(xs_b.max() - xs_b.min() + 1)
+        bh_b = int(ys_b.max() - ys_b.min() + 1)
+        densidad_alt = float(xs_b.size) / float(max(1, bw_b * bh_b))
+        if densidad_alt > 0.42:
+            return (
+                False,
+                None,
+                f"{base_detail} alt_ink_rescue blob_denso densidad={densidad_alt:.2f}",
+                False,
+            )
+
+    out_alt = _render_firma_en_fondo_claro(gray_crop_alt, mask_crop_alt, cv2_mod, np_mod, params)
     detail_alt = (
         f"{base_detail} alt_ink_rescue alt_ratio={alt_ratio:.4f} "
         f"{alt_clean_detail} {alt_border_detail} {alt_cluster_detail} "
-        f"{alt_thick_detail} crop_ratio={crop_ratio_alt:.4f}"
+        f"{alt_deskew_detail} {alt_thick_detail} crop_ratio={crop_ratio_alt:.4f}"
     )
     return True, out_alt, detail_alt.strip(), alt_thickened
 
@@ -746,11 +1112,27 @@ def _procesar_firma_imagen(image: Image.Image) -> tuple[Image.Image, str, bool, 
     Retorna (imagen_procesada, detalle, revision_manual, trazo_engrosado).
     """
     cv2_mod, np_mod = _cargar_cv2_numpy()
+    params = _leer_params_firma()
 
     arr_rgb = np_mod.array(image.convert("RGB"))
+
+    # Upscale de fotos pequenas (miniaturas): a baja resolucion el trazo fino ocupa ~1px y la
+    # morfologia (OPEN 2x2) lo fragmenta en "guiones". Interpolar (cubica) reconstruye el trazo
+    # continuo que la foto ya contiene y lo engrosa lo suficiente para sobrevivir. No inventa tinta.
+    upscale_detail = ""
+    min_dim_cfg = int(params.get("min_process_dim", 600))
+    h0, w0 = arr_rgb.shape[:2]
+    if min_dim_cfg > 0 and min(h0, w0) < min_dim_cfg:
+        scale = min(6.0, float(min_dim_cfg) / float(max(1, min(h0, w0))))
+        if scale > 1.01:
+            arr_rgb = cv2_mod.resize(arr_rgb, None, fx=scale, fy=scale, interpolation=cv2_mod.INTER_CUBIC)
+            upscale_detail = f"upscaled_x{scale:.1f}"
+
     gray = cv2_mod.cvtColor(arr_rgb, cv2_mod.COLOR_RGB2GRAY)
 
-    mask_raw, mask_detail = _generar_mascara_firma(gray, cv2_mod, np_mod)
+    mask_raw, mask_detail = _generar_mascara_firma(arr_rgb, gray, cv2_mod, np_mod, params)
+    if upscale_detail:
+        mask_detail = f"{upscale_detail} {mask_detail}"
     raw_fg = int(np_mod.count_nonzero(mask_raw))
     raw_ratio = float(raw_fg) / float(max(1, mask_raw.size))
 
@@ -763,6 +1145,10 @@ def _procesar_firma_imagen(image: Image.Image) -> tuple[Image.Image, str, bool, 
     mask_clean, clean_detail = _limpiar_ruido_conservador(mask_raw, cv2_mod, np_mod)
     mask_border, border_detail = _suprimir_artefactos_de_borde(mask_clean, cv2_mod, np_mod)
     mask_cluster, cluster_detail = _filtrar_cluster_principal_firma(mask_border, cv2_mod, np_mod)
+    mask_cluster, motas_detail = _quitar_motas_lejanas(mask_cluster, cv2_mod, np_mod, params)
+    # Reconstruccion fiel: puentear gaps + rellenar huecos pequenos del contorneado.
+    mask_cluster, fill_detail = _rellenar_trazo(mask_cluster, cv2_mod, np_mod, params)
+    cluster_detail = f"{cluster_detail} {motas_detail} {fill_detail}"
 
     clean_fg = int(np_mod.count_nonzero(mask_cluster))
 
@@ -783,7 +1169,7 @@ def _procesar_firma_imagen(image: Image.Image) -> tuple[Image.Image, str, bool, 
     def _try_alt_rescue():
         nonlocal alt_rescue_cache
         if alt_rescue_cache is None:
-            alt_rescue_cache = _intentar_rescate_alt(arr_rgb, gray, main_base_detail, cv2_mod, np_mod)
+            alt_rescue_cache = _intentar_rescate_alt(arr_rgb, gray, main_base_detail, cv2_mod, np_mod, params)
         return alt_rescue_cache
 
     collapse_ratio = float(clean_fg) / float(max(1, raw_fg))
@@ -829,7 +1215,20 @@ def _procesar_firma_imagen(image: Image.Image) -> tuple[Image.Image, str, bool, 
             False,
         )
 
-    mask_final, thick_detail, thickened = _engrosar_si_tenue(mask_cluster, cv2_mod, np_mod)
+    # Deskew (enderezado) con guardas, sobre el trazo limpio. Si intento enderezar pero
+    # el resultado quedo dudoso -> REVISAR MANUAL (no subir una firma mal-rotada).
+    gray, mask_cluster, deskew_detail, _deskew_roto, deskew_incierto = _enderezar_firma(
+        gray, mask_cluster, cv2_mod, np_mod, params
+    )
+    if deskew_incierto:
+        return (
+            image.convert("L"),
+            f"{main_base_detail} {deskew_detail} deskew_revision_manual",
+            True,
+            False,
+        )
+
+    mask_final, thick_detail, thickened = _engrosar_si_tenue(mask_cluster, cv2_mod, np_mod, params)
 
     try:
         gray_crop, mask_crop = _recortar_firma(gray, mask_final, cv2_mod, np_mod)
@@ -859,6 +1258,19 @@ def _procesar_firma_imagen(image: Image.Image) -> tuple[Image.Image, str, bool, 
             thickened,
         )
 
+    # Blob DENSO (sombra/contaminacion, NO firma): una firma son trazos finos -> densidad baja
+    # dentro de su bbox; un blob solido -> densidad alta. Si es solido -> REVISAR MANUAL.
+    ys_b, xs_b = np_mod.where(mask_crop > 0)
+    if xs_b.size > 0:
+        bw_b = int(xs_b.max() - xs_b.min() + 1)
+        bh_b = int(ys_b.max() - ys_b.min() + 1)
+        densidad = float(xs_b.size) / float(max(1, bw_b * bh_b))
+        if densidad > 0.42:
+            rescue_ok, rescue_img, rescue_detail, rescue_thick = _try_alt_rescue()
+            if rescue_ok:
+                return rescue_img, rescue_detail, False, rescue_thick
+            return image.convert("L"), f"{main_base_detail} blob_denso densidad={densidad:.2f}", True, thickened
+
     # Salvaguarda anti-falso-positivo: si casi todo el recorte es "trazo",
     # intentamos una segunda pasada por tinta antes de mandar a revision manual.
     if crop_ratio > 0.52:
@@ -876,10 +1288,10 @@ def _procesar_firma_imagen(image: Image.Image) -> tuple[Image.Image, str, bool, 
             thickened,
         )
 
-    out = _render_firma_en_fondo_claro(gray_crop, mask_crop, cv2_mod, np_mod)
+    out = _render_firma_en_fondo_claro(gray_crop, mask_crop, cv2_mod, np_mod, params)
     detail = (
         f"{mask_detail} {clean_detail} {border_detail} {cluster_detail} "
-        f"{thick_detail} crop_ratio={crop_ratio:.4f}"
+        f"{deskew_detail} {thick_detail} crop_ratio={crop_ratio:.4f}"
     )
     return out, detail.strip(), False, thickened
 
@@ -1029,11 +1441,34 @@ def procesar_firma_digital_por_dni(
         return {"status": "error_procesamiento", "observation": "DNI INVALIDO", "detail": "dni vacio"}
 
     raw = str(firma_source_map.get(dni_digits, "") or "").strip()
-    if raw == "__MULTIPLE__":
+    if raw.startswith("__MULTIPLE__"):
+        # Multiples firmas distintas en la fuente: no se puede elegir -> REVISAR MANUAL, pero
+        # SI guardamos TODAS las originales candidatas para que el revisor las vea/escoja.
+        urls = [u.strip() for u in raw.split("\t")[1:] if u.strip()]
+        guardadas = []
+        if save_original:
+            destino_dir = lote_dir / dni_digits
+            destino_dir.mkdir(parents=True, exist_ok=True)
+            for idx, u in enumerate(urls, 1):
+                fid = _extraer_drive_file_id(u)
+                if not fid:
+                    continue
+                try:
+                    cont, mim = _descargar_drive_bytes(fid, credentials_path)
+                    ext = ext_desde_mime(mim, cont)
+                    destino = destino_dir / f"firma_digital_{dni_digits}_original_{idx}.{ext}"
+                    if not destino.exists() or overwrite_existing:
+                        destino.write_bytes(cont)
+                    guardadas.append(destino.name)
+                except Exception:
+                    continue
+        obs = f"{dni_digits} MULTIPLES FIRMAS EN FUENTE ({len(urls)})"
+        if guardadas:
+            obs += " - ORIGINALES GUARDADAS"
         return {
             "status": "revision_manual",
-            "observation": f"{dni_digits} MULTIPLES FIRMAS EN FUENTE",
-            "detail": "dni_con_multiples_urls_en_hoja_base",
+            "observation": obs,
+            "detail": f"dni_con_multiples_urls_en_hoja_base candidatos={len(urls)} guardadas={len(guardadas)}",
         }
 
     if not raw:

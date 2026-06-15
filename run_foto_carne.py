@@ -267,12 +267,16 @@ def _worker_foto_carne(
                     resultado.get("observation", ""),
                     resultado.get("detail", ""),
                 )
+                obs_error = str(resultado.get("observation", "ERROR DE TRATAMIENTO"))
+                detalle_error = str(resultado.get("detail", "")).strip()
+                if detalle_error:
+                    obs_error = f"{obs_error} | {detalle_error[:160]}"
                 _marcar_fila_foto_carne(
                     cfg,
                     fieldnames,
                     row_number,
                     cfg.estado_error,
-                    str(resultado.get("observation", "ERROR DE TRATAMIENTO")),
+                    obs_error,
                     logger,
                 )
         except Exception as exc:
@@ -386,6 +390,14 @@ def main() -> int:
         errores,
         lote_dir,
     )
+    # Envio del lote por correo (omitido en modo orquestado run.bat all -> LOTE_MAIL_DEFER=1).
+    try:
+        from flows.notifications.enviar_lote import enviar_lote_post_run
+
+        enviar_lote_post_run(lote_dir, "foto_carne", logger)
+    except Exception as exc:
+        logger.warning("[FOTO CARNE] No se pudo enviar el lote por correo: %s", exc)
+
     # Los errores por-registro (p.ej. foto de un DNI no es imagen valida) NO son fatales:
     # ya quedan marcados en la hoja como ERROR y en el log. Devolvemos 0 para que run.bat
     # continue con DJ FUT y Firma. Solo los fallos de config (.env) devuelven !=0 (return 2).

@@ -26,6 +26,7 @@ if not exist "%GLOBAL_LOTE_DIR%" mkdir "%GLOBAL_LOTE_DIR%"
 echo [RUN] Lote compartido: %GLOBAL_LOTE_DIR%
 exit /b 0
 
+REM En flujos INDIVIDUALES el correo lo envia el propio run_*.py (al terminar main()).
 :run_galenius
 call :prepare_shared_lote
 if errorlevel 1 exit /b 1
@@ -50,9 +51,22 @@ if errorlevel 1 exit /b 1
 call "scripts\bat\run_firma_digital.bat"
 exit /b %ERRORLEVEL%
 
+:send_lote
+REM Envia el lote COMBINADO una sola vez (lo usa run_all). No aborta la corrida si falla.
+if not defined GLOBAL_LOTE_DIR exit /b 0
+if exist ".venv\Scripts\python.exe" (
+  ".venv\Scripts\python.exe" -m flows.notifications.enviar_lote "%GLOBAL_LOTE_DIR%" "%~1"
+) else (
+  python -m flows.notifications.enviar_lote "%GLOBAL_LOTE_DIR%" "%~1"
+)
+exit /b 0
+
 :run_all
 call :prepare_shared_lote
 if errorlevel 1 exit /b 1
+
+REM Modo orquestado: los run_*.py NO envian correo individual; se envia 1 lote combinado al final.
+set "LOTE_MAIL_DEFER=1"
 
 set "FLOW_NAME=galenius"
 echo [RUN] Iniciando GALENIUS...
@@ -83,6 +97,7 @@ echo [RUN] FIRMA DIGITAL finalizo con codigo %EXIT_CODE%.
 if not "%EXIT_CODE%"=="0" goto flow_error
 
 echo [RUN] Flujo completo finalizado en lote compartido.
+call :send_lote completo
 exit /b 0
 
 :flow_error
