@@ -2,46 +2,105 @@
 
 ## Instalacion Inicial
 
-Pasos minimos para preparar una maquina nueva desde cero:
+Pasos para preparar una maquina nueva desde cero, usando un entorno virtual aislado.
 
-1. Instalar Python 3 desde la pagina oficial: https://www.python.org/downloads/
+### 1. Instalar Python 3
 
-   Durante la instalacion en Windows, marcar la opcion `Add python.exe to PATH`.
+Descargar Python 3.10 o superior desde la pagina oficial: https://www.python.org/downloads/
 
-2. Abrir PowerShell o CMD dentro de la carpeta del proyecto.
+Durante la instalacion en Windows, marcar la opcion `Add python.exe to PATH`.
 
-3. Verificar que Python y pip quedaron disponibles:
+### 2. Obtener el proyecto
+
+Abrir PowerShell o CMD y ubicarse dentro de la carpeta del proyecto (la que contiene `requirements.txt` y `run.bat`):
+
+```powershell
+cd C:\ruta\al\proyecto\DOCUMENTOS-CARNET-GADSO
+```
+
+Verificar que Python y pip quedaron disponibles:
 
 ```powershell
 python --version
 pip --version
 ```
 
-4. Instalar las dependencias del proyecto:
+### 3. Crear el entorno virtual
+
+Crear el entorno virtual (la carpeta se llamara `.venv`):
 
 ```powershell
+python -m venv .venv
+```
+
+### 4. Activar el entorno virtual
+
+En PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+En CMD:
+
+```bat
+.\.venv\Scripts\activate.bat
+```
+
+Cuando el entorno esta activo, el prompt muestra el prefijo `(.venv)`.
+
+Si PowerShell bloquea la activacion por politica de ejecucion, habilitarla solo para el usuario actual y reintentar:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+Para salir del entorno virtual en cualquier momento:
+
+```powershell
+deactivate
+```
+
+### 5. Instalar dependencias
+
+Con el entorno virtual activo, actualizar pip e instalar las dependencias del proyecto:
+
+```powershell
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-5. Instalar los navegadores que necesita Playwright:
+### 6. Instalar los navegadores de Playwright
 
 ```powershell
 python -m playwright install
 ```
 
-   Si solo se usara Chromium, se puede instalar unicamente ese navegador:
+Si solo se usara Chromium, se puede instalar unicamente ese navegador:
 
 ```powershell
 python -m playwright install chromium
 ```
 
-6. Configurar el archivo `.env` con las credenciales y variables necesarias.
+### 7. Configurar el archivo `.env`
 
-7. Ejecutar el flujo desde el launcher correspondiente, por ejemplo:
+Copiar la plantilla de ejemplo a la raiz del proyecto y editar las credenciales y variables necesarias:
+
+```powershell
+copy ejemplos\.env.galenius.example .env
+```
+
+Como minimo, completar `GALENIUS_URL_LOGIN`, `GALENIUS_USERNAME` y `GALENIUS_PASSWORD` (ver la seccion **Variables Minimas**). Para los flujos que usan Google Drive/Sheets, configurar tambien las credenciales correspondientes (`DRIVE_CREDENTIALS_JSON` y derivadas).
+
+### 8. Ejecutar el flujo
+
+Con el entorno virtual activo, lanzar el flujo desde el launcher en raiz, por ejemplo:
 
 ```powershell
 .\run.bat
 ```
+
+> Importante: el entorno virtual **debe** llamarse `.venv` y vivir en la raiz del proyecto. Los launchers internos (`scripts\bat\run_*.bat`) invocan directamente `.venv\Scripts\python.exe`, de modo que `run.bat` ya usa el Python del entorno aunque no lo actives manualmente. La activacion del paso 4 solo es necesaria cuando ejecutas comandos sueltos (`pip`, `python -m ...`) por tu cuenta.
 
 Este repositorio, en este contexto de trabajo, concentra los flujos documentales de:
 
