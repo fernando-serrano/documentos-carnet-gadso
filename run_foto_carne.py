@@ -52,7 +52,11 @@ def load_foto_carne_config() -> FotoCarneConfig:
     base_dir = Path(__file__).resolve().parent
     logs_root = base_dir / str(os.getenv("FOTO_CARNE_LOG_DIR", "logs/foto_carne")).strip()
     lotes_root = base_dir / str(os.getenv("FOTO_CARNE_LOTES_DIR", "lotes")).strip()
-    queue_sheet_url = str(os.getenv("FOTO_CARNE_QUEUE_SHEET_URL", os.getenv("GALENIUS_QUEUE_SHEET_URL", ""))).strip()
+    _active_workbook = os.getenv("ACTIVE_WORKBOOK", "A").strip().upper()
+    _suffix = "_B" if _active_workbook == "B" else ""
+    queue_sheet_url = str(
+        os.getenv(f"FOTO_CARNE_QUEUE_SHEET_URL{_suffix}", os.getenv(f"GALENIUS_QUEUE_SHEET_URL{_suffix}", ""))
+    ).strip()
     source_sheet_url = str(os.getenv("FOTO_CARNE_SOURCE_SHEET_URL", "")).strip()
     drive_credentials_json = str(os.getenv("FOTO_CARNE_DRIVE_CREDENTIALS_JSON", os.getenv("DRIVE_CREDENTIALS_JSON", ""))).strip()
     # Default 79: 79 * 1024 * 0.95 (headroom) ~= 75.0 KB -> tope duro de 75 KB.

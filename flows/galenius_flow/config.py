@@ -60,12 +60,11 @@ def load_galenius_config() -> GaleniusConfig:
             "https://autovias.galenius.com/7504e858-657f-4de8-89bf-3112dc65117b/armas/armas/certificados",
         )
     ).strip()
-    queue_sheet_url = str(
-        os.getenv(
-            "GALENIUS_QUEUE_SHEET_URL",
-            "https://docs.google.com/spreadsheets/d/1C-V6wNGXQEVfncbldOQfhDKT7Qwuk2BV6Y_gnV5-O4U/edit?gid=214579984#gid=214579984",
-        )
-    ).strip()
+    _active_workbook = os.getenv("ACTIVE_WORKBOOK", "A").strip().upper()
+    _default_queue_url_a = "https://docs.google.com/spreadsheets/d/1C-V6wNGXQEVfncbldOQfhDKT7Qwuk2BV6Y_gnV5-O4U/edit?gid=214579984#gid=214579984"
+    _queue_env_name = "GALENIUS_QUEUE_SHEET_URL_B" if _active_workbook == "B" else "GALENIUS_QUEUE_SHEET_URL"
+    _queue_default = "" if _active_workbook == "B" else _default_queue_url_a
+    queue_sheet_url = str(os.getenv(_queue_env_name, _queue_default)).strip()
     queue_sheet_title = str(os.getenv("GALENIUS_QUEUE_SHEET_TITLE", "BOT DOCUMENTOS")).strip()
     usuario = str(os.getenv("GALENIUS_USERNAME", "")).strip()
     contrasena = str(os.getenv("GALENIUS_PASSWORD", "")).strip()

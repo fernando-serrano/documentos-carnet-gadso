@@ -75,7 +75,11 @@ def load_firma_digital_config() -> FirmaDigitalConfig:
         os.getenv("FIRMA_DIGITAL_LOG_DIR", os.getenv("FIRMA_LOG_DIR", "logs/firma_digital"))
     ).strip()
     lotes_root = base_dir / str(os.getenv("FIRMA_DIGITAL_LOTES_DIR", "lotes")).strip()
-    queue_sheet_url = str(os.getenv("FIRMA_DIGITAL_QUEUE_SHEET_URL", os.getenv("GALENIUS_QUEUE_SHEET_URL", ""))).strip()
+    _active_workbook = os.getenv("ACTIVE_WORKBOOK", "A").strip().upper()
+    _suffix = "_B" if _active_workbook == "B" else ""
+    queue_sheet_url = str(
+        os.getenv(f"FIRMA_DIGITAL_QUEUE_SHEET_URL{_suffix}", os.getenv(f"GALENIUS_QUEUE_SHEET_URL{_suffix}", ""))
+    ).strip()
     source_sheet_url = str(
         os.getenv("FIRMA_DIGITAL_SOURCE_SHEET_URL", os.getenv("FIRMA_SOURCE_SHEET_URL", ""))
     ).strip()

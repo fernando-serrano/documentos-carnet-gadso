@@ -50,7 +50,11 @@ def load_dj_fut_config() -> DjFutConfig:
     base_dir = Path(__file__).resolve().parent
     logs_root = base_dir / str(os.getenv("DJ_FUT_LOG_DIR", "logs/dj_fut")).strip()
     lotes_root = base_dir / str(os.getenv("DJ_FUT_LOTES_DIR", "lotes")).strip()
-    queue_sheet_url = str(os.getenv("DJ_FUT_QUEUE_SHEET_URL", os.getenv("GALENIUS_QUEUE_SHEET_URL", ""))).strip()
+    _active_workbook = os.getenv("ACTIVE_WORKBOOK", "A").strip().upper()
+    _suffix = "_B" if _active_workbook == "B" else ""
+    queue_sheet_url = str(
+        os.getenv(f"DJ_FUT_QUEUE_SHEET_URL{_suffix}", os.getenv(f"GALENIUS_QUEUE_SHEET_URL{_suffix}", ""))
+    ).strip()
     source_sheet_url = str(os.getenv("DJ_FUT_SOURCE_SHEET_URL", "")).strip()
     drive_credentials_json = str(os.getenv("DJ_FUT_DRIVE_CREDENTIALS_JSON", os.getenv("DRIVE_CREDENTIALS_JSON", ""))).strip()
     max_kb = max(20, int(str(os.getenv("DJ_FUT_MAX_KB", "80") or "80").strip()))
