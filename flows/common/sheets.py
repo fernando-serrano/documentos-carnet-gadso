@@ -111,6 +111,38 @@ def read_sheet_rows(
     return rows, list(reader.fieldnames or [])
 
 
+def read_sheet_values_api(sheet_url: str, credentials_path: str) -> tuple[list[dict], list[str]]:
+    """Lee la hoja via Sheets API v4 (autenticado), sin el cache del endpoint de exportacion CSV.
+
+    Mismo formato de salida que ``read_sheet_rows`` (lista de dicts con
+    ``__row_number__`` + fieldnames) para que el llamador pueda tratarlas igual.
+    """
+    service = build_sheets_service(credentials_path)
+    spreadsheet_id = extract_sheet_id_from_url(sheet_url)
+    gid = extract_gid_from_url(sheet_url)
+    sheet_title = sheet_title_from_gid(service, spreadsheet_id, gid)
+    safe_title = str(sheet_title or "").replace("'", "''")
+
+    response = service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{safe_title}'",
+    ).execute()
+    values = response.get("values", []) or []
+    if not values:
+        return [], []
+
+    fieldnames = [str(v or "") for v in values[0]]
+    rows = []
+    for index, raw_row in enumerate(values[1:], start=2):
+        row = {
+            fieldnames[i]: (str(raw_row[i]) if i < len(raw_row) else "")
+            for i in range(len(fieldnames))
+        }
+        row["__row_number__"] = index
+        rows.append(row)
+    return rows, fieldnames
+
+
 def build_sheets_service(credentials_path: str):
     try:
         service_account = importlib.import_module("google.oauth2.service_account")

@@ -26,16 +26,33 @@ _ESTADO_COLUMNAS: list[tuple[list[str], str]] = [
 ]
 
 
+def _leer_cola_actual(queue_url: str) -> tuple[list[dict], list[str]] | None:
+    """Lee la cola preferentemente via Sheets API (fresca, sin cache), cayendo al
+    CSV publico si no hay credenciales configuradas o la API falla por cualquier
+    motivo. Devuelve None solo si ninguna de las dos vias pudo leer la hoja."""
+    credentials_path = str(os.getenv("DRIVE_CREDENTIALS_JSON", "") or "").strip()
+    if credentials_path:
+        try:
+            return _sheets.read_sheet_values_api(queue_url, credentials_path)
+        except Exception:
+            pass  # cae a la lectura publica (CSV) mas abajo
+
+    try:
+        return _sheets.read_sheet_rows(queue_url, **_READ_SETTINGS)
+    except Exception:
+        return None
+
+
 def hay_registros_en_proceso(queue_url: str) -> bool:
     """True si la cola tiene alguna fila EN PROCESO, o si no se pudo confirmar que está libre."""
     url = str(queue_url or "").strip()
     if not url:
         return True
 
-    try:
-        rows, fieldnames = _sheets.read_sheet_rows(url, **_READ_SETTINGS)
-    except Exception:
+    resultado = _leer_cola_actual(url)
+    if resultado is None:
         return True
+    rows, fieldnames = resultado
 
     for candidatos, env_var in _ESTADO_COLUMNAS:
         columna = _sheets.resolver_columna(fieldnames, candidatos)

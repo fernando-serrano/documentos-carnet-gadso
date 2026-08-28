@@ -122,6 +122,66 @@ def test_decidir_lane_none_si_a_ocupada_y_b_no_configurada():
     _con_lecturas(rows, _run)
 
 
+def _con_api(rows_por_url=None, excepcion=None, fn=None):
+    original_api = sheets.read_sheet_values_api
+
+    def _fake_api(sheet_url, credentials_path):
+        if excepcion is not None:
+            raise excepcion
+        return (rows_por_url or {}).get(sheet_url, []), _FIELDNAMES
+
+    sheets.read_sheet_values_api = _fake_api
+    try:
+        fn()
+    finally:
+        sheets.read_sheet_values_api = original_api
+
+
+def test_hay_registros_en_proceso_prefiere_api_cuando_hay_credenciales():
+    os.environ["DRIVE_CREDENTIALS_JSON"] = "C:/fake/creds.json"
+    try:
+        rows_api = {"https://sheet-a": [_fila("11111111", **{"ESTADO FOTO CARNÉ": "EN PROCESO"})]}
+        rows_csv = {"https://sheet-a": [_fila("11111111")]}  # CSV "desactualizado": diria libre
+
+        def _run():
+            assert workbook_lock.hay_registros_en_proceso("https://sheet-a") is True
+
+        _con_api(rows_api, fn=lambda: _con_lecturas(rows_csv, _run))
+    finally:
+        os.environ.pop("DRIVE_CREDENTIALS_JSON", None)
+
+
+def test_hay_registros_en_proceso_cae_a_csv_si_la_api_falla():
+    os.environ["DRIVE_CREDENTIALS_JSON"] = "C:/fake/creds.json"
+    try:
+        rows_csv = {"https://sheet-a": [_fila("11111111")]}
+
+        def _run():
+            assert workbook_lock.hay_registros_en_proceso("https://sheet-a") is False
+
+        _con_api(excepcion=RuntimeError("API no disponible"), fn=lambda: _con_lecturas(rows_csv, _run))
+    finally:
+        os.environ.pop("DRIVE_CREDENTIALS_JSON", None)
+
+
+def test_hay_registros_en_proceso_usa_csv_si_no_hay_credenciales():
+    os.environ.pop("DRIVE_CREDENTIALS_JSON", None)
+    rows_csv = {"https://sheet-a": [_fila("11111111")]}
+
+    def _api_no_deberia_llamarse(*_args, **_kwargs):
+        raise AssertionError("read_sheet_values_api no deberia invocarse sin credenciales")
+
+    def _run():
+        assert workbook_lock.hay_registros_en_proceso("https://sheet-a") is False
+
+    original_api = sheets.read_sheet_values_api
+    sheets.read_sheet_values_api = _api_no_deberia_llamarse
+    try:
+        _con_lecturas(rows_csv, _run)
+    finally:
+        sheets.read_sheet_values_api = original_api
+
+
 if __name__ == "__main__":
     test_hay_registros_en_proceso_false_cuando_todo_pendiente()
     test_hay_registros_en_proceso_true_si_alguna_columna_esta_en_proceso()
@@ -130,4 +190,7 @@ if __name__ == "__main__":
     test_decidir_lane_usa_b_si_a_ocupada_y_b_libre()
     test_decidir_lane_none_si_ambas_ocupadas()
     test_decidir_lane_none_si_a_ocupada_y_b_no_configurada()
+    test_hay_registros_en_proceso_prefiere_api_cuando_hay_credenciales()
+    test_hay_registros_en_proceso_cae_a_csv_si_la_api_falla()
+    test_hay_registros_en_proceso_usa_csv_si_no_hay_credenciales()
     print("OK - test_workbook_lock")
