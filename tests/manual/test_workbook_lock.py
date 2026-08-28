@@ -42,81 +42,53 @@ def _con_lecturas(rows_por_url, fn):
         sheets.read_sheet_rows = original
 
 
-def test_hay_pendientes_true_si_alguna_columna_de_estado_esta_vacia():
+def test_hay_en_proceso_false_cuando_todo_resuelto_o_pendiente():
     rows = {
         "https://sheet-a": [
-            _fila("11111111", **{"ESTADO FOTO CARNÉ": "DESCARGADO"}),  # DJ FUT/Firma/Galenius siguen vacios
+            _fila("11111111"),  # todo vacio, pendiente normal
+            _fila("22222222", **{"ESTADO FOTO CARNÉ": "DESCARGADO"}),  # ya resuelto
         ]
     }
 
     def _run():
-        assert workbook_lock.hay_pendientes("https://sheet-a") is True
+        assert workbook_lock.hay_en_proceso("https://sheet-a") is False
 
     _con_lecturas(rows, _run)
 
 
-def test_hay_pendientes_false_si_las_4_columnas_ya_tienen_algun_valor():
+def test_hay_en_proceso_true_si_alguna_columna_esta_en_proceso():
     rows = {
         "https://sheet-a": [
-            _fila(
-                "11111111",
-                **{
-                    "ESTADO CERTIFICADO MEDICO": "DESCARGADO",
-                    "ESTADO FOTO CARNÉ": "ERROR",
-                    "ESTADO DJ FUT": "EN PROCESO W2",
-                    "ESTADO FIRMA": "DESCARGADO",
-                },
-            ),
+            _fila("11111111", **{"ESTADO DJ FUT": "EN PROCESO W2"}),
         ]
     }
 
     def _run():
-        assert workbook_lock.hay_pendientes("https://sheet-a") is False
+        assert workbook_lock.hay_en_proceso("https://sheet-a") is True
 
     _con_lecturas(rows, _run)
 
 
-def test_hay_pendientes_false_si_no_hay_filas_con_dni():
-    rows = {"https://sheet-a": []}
-
-    def _run():
-        assert workbook_lock.hay_pendientes("https://sheet-a") is False
-
-    _con_lecturas(rows, _run)
+def test_hay_en_proceso_false_si_url_vacia():
+    assert workbook_lock.hay_en_proceso("") is False
 
 
-def test_hay_pendientes_ignora_filas_sin_dni():
-    rows = {"https://sheet-a": [_fila("", **{"ESTADO FOTO CARNÉ": ""})]}
-
-    def _run():
-        assert workbook_lock.hay_pendientes("https://sheet-a") is False
-
-    _con_lecturas(rows, _run)
-
-
-def test_hay_pendientes_false_si_url_vacia():
-    assert workbook_lock.hay_pendientes("") is False
-
-
-def test_hay_pendientes_false_si_falla_la_lectura():
+def test_hay_en_proceso_false_si_falla_la_lectura():
     def _lectura_que_falla(sheet_url, **_settings):
         raise RuntimeError("timeout")
 
     original = sheets.read_sheet_rows
     sheets.read_sheet_rows = _lectura_que_falla
     try:
-        assert workbook_lock.hay_pendientes("https://sheet-a") is False
+        assert workbook_lock.hay_en_proceso("https://sheet-a") is False
     finally:
         sheets.read_sheet_rows = original
 
 
-def test_decidir_lane_usa_a_si_tiene_pendientes():
+def test_decidir_lane_usa_a_si_no_esta_en_proceso():
     os.environ["GALENIUS_QUEUE_SHEET_URL"] = "https://sheet-a"
     os.environ["GALENIUS_QUEUE_SHEET_URL_B"] = "https://sheet-b"
-    rows = {
-        "https://sheet-a": [_fila("11111111")],  # todo vacio -> pendiente
-        "https://sheet-b": [_fila("22222222")],
-    }
+    rows = {"https://sheet-a": [_fila("11111111")]}
 
     def _run():
         assert workbook_lock.decidir_lane() == "A"
@@ -124,22 +96,12 @@ def test_decidir_lane_usa_a_si_tiene_pendientes():
     _con_lecturas(rows, _run)
 
 
-def test_decidir_lane_usa_b_si_a_no_tiene_pendientes_y_b_si():
+def test_decidir_lane_usa_b_si_a_esta_en_proceso_aunque_b_no_tenga_dnis():
     os.environ["GALENIUS_QUEUE_SHEET_URL"] = "https://sheet-a"
     os.environ["GALENIUS_QUEUE_SHEET_URL_B"] = "https://sheet-b"
     rows = {
-        "https://sheet-a": [
-            _fila(
-                "11111111",
-                **{
-                    "ESTADO CERTIFICADO MEDICO": "DESCARGADO",
-                    "ESTADO FOTO CARNÉ": "DESCARGADO",
-                    "ESTADO DJ FUT": "DESCARGADO",
-                    "ESTADO FIRMA": "DESCARGADO",
-                },
-            ),
-        ],
-        "https://sheet-b": [_fila("22222222")],
+        "https://sheet-a": [_fila("11111111", **{"ESTADO FOTO CARNÉ": "EN PROCESO W1"})],
+        "https://sheet-b": [],  # B vacia -- igual se elige, sin punto medio
     }
 
     def _run():
@@ -148,36 +110,26 @@ def test_decidir_lane_usa_b_si_a_no_tiene_pendientes_y_b_si():
     _con_lecturas(rows, _run)
 
 
-def test_decidir_lane_none_si_ninguna_tiene_pendientes():
+def test_decidir_lane_usa_b_aunque_a_tenga_trabajo_pendiente_real():
     os.environ["GALENIUS_QUEUE_SHEET_URL"] = "https://sheet-a"
     os.environ["GALENIUS_QUEUE_SHEET_URL_B"] = "https://sheet-b"
-    estados_completos = {
-        "ESTADO CERTIFICADO MEDICO": "DESCARGADO",
-        "ESTADO FOTO CARNÉ": "DESCARGADO",
-        "ESTADO DJ FUT": "DESCARGADO",
-        "ESTADO FIRMA": "DESCARGADO",
-    }
     rows = {
-        "https://sheet-a": [_fila("11111111", **estados_completos)],
-        "https://sheet-b": [],
+        "https://sheet-a": [
+            _fila("11111111", **{"ESTADO FOTO CARNÉ": "EN PROCESO W1"}),
+            _fila("22222222"),  # fila con trabajo pendiente real (todo vacio)
+        ],
     }
 
     def _run():
-        assert workbook_lock.decidir_lane() is None
+        assert workbook_lock.decidir_lane() == "B"
 
     _con_lecturas(rows, _run)
 
 
-def test_decidir_lane_none_si_b_no_esta_configurada_y_a_no_tiene_pendientes():
+def test_decidir_lane_none_si_a_en_proceso_y_b_no_configurada():
     os.environ["GALENIUS_QUEUE_SHEET_URL"] = "https://sheet-a"
     os.environ.pop("GALENIUS_QUEUE_SHEET_URL_B", None)
-    estados_completos = {
-        "ESTADO CERTIFICADO MEDICO": "DESCARGADO",
-        "ESTADO FOTO CARNÉ": "DESCARGADO",
-        "ESTADO DJ FUT": "DESCARGADO",
-        "ESTADO FIRMA": "DESCARGADO",
-    }
-    rows = {"https://sheet-a": [_fila("11111111", **estados_completos)]}
+    rows = {"https://sheet-a": [_fila("11111111", **{"ESTADO FOTO CARNÉ": "EN PROCESO W1"})]}
 
     def _run():
         assert workbook_lock.decidir_lane() is None
@@ -200,48 +152,42 @@ def _con_api(rows_por_url=None, excepcion=None, fn=None):
         sheets.read_sheet_values_api = original_api
 
 
-def test_hay_pendientes_prefiere_api_cuando_hay_credenciales():
+def test_hay_en_proceso_prefiere_api_cuando_hay_credenciales():
     os.environ["DRIVE_CREDENTIALS_JSON"] = "C:/fake/creds.json"
     try:
-        rows_api = {"https://sheet-a": [_fila("11111111")]}  # API: pendiente
-        estados_completos = {
-            "ESTADO CERTIFICADO MEDICO": "DESCARGADO",
-            "ESTADO FOTO CARNÉ": "DESCARGADO",
-            "ESTADO DJ FUT": "DESCARGADO",
-            "ESTADO FIRMA": "DESCARGADO",
-        }
-        rows_csv = {"https://sheet-a": [_fila("11111111", **estados_completos)]}  # CSV "desactualizado": diria sin pendientes
+        rows_api = {"https://sheet-a": [_fila("11111111", **{"ESTADO FOTO CARNÉ": "EN PROCESO"})]}
+        rows_csv = {"https://sheet-a": [_fila("11111111")]}  # CSV "desactualizado": diria libre
 
         def _run():
-            assert workbook_lock.hay_pendientes("https://sheet-a") is True
+            assert workbook_lock.hay_en_proceso("https://sheet-a") is True
 
         _con_api(rows_api, fn=lambda: _con_lecturas(rows_csv, _run))
     finally:
         os.environ.pop("DRIVE_CREDENTIALS_JSON", None)
 
 
-def test_hay_pendientes_cae_a_csv_si_la_api_falla():
+def test_hay_en_proceso_cae_a_csv_si_la_api_falla():
     os.environ["DRIVE_CREDENTIALS_JSON"] = "C:/fake/creds.json"
     try:
-        rows_csv = {"https://sheet-a": [_fila("11111111")]}
+        rows_csv = {"https://sheet-a": [_fila("11111111", **{"ESTADO FOTO CARNÉ": "EN PROCESO"})]}
 
         def _run():
-            assert workbook_lock.hay_pendientes("https://sheet-a") is True
+            assert workbook_lock.hay_en_proceso("https://sheet-a") is True
 
         _con_api(excepcion=RuntimeError("API no disponible"), fn=lambda: _con_lecturas(rows_csv, _run))
     finally:
         os.environ.pop("DRIVE_CREDENTIALS_JSON", None)
 
 
-def test_hay_pendientes_usa_csv_si_no_hay_credenciales():
+def test_hay_en_proceso_usa_csv_si_no_hay_credenciales():
     os.environ.pop("DRIVE_CREDENTIALS_JSON", None)
-    rows_csv = {"https://sheet-a": [_fila("11111111")]}
+    rows_csv = {"https://sheet-a": [_fila("11111111", **{"ESTADO FOTO CARNÉ": "EN PROCESO"})]}
 
     def _api_no_deberia_llamarse(*_args, **_kwargs):
         raise AssertionError("read_sheet_values_api no deberia invocarse sin credenciales")
 
     def _run():
-        assert workbook_lock.hay_pendientes("https://sheet-a") is True
+        assert workbook_lock.hay_en_proceso("https://sheet-a") is True
 
     original_api = sheets.read_sheet_values_api
     sheets.read_sheet_values_api = _api_no_deberia_llamarse
@@ -252,17 +198,15 @@ def test_hay_pendientes_usa_csv_si_no_hay_credenciales():
 
 
 if __name__ == "__main__":
-    test_hay_pendientes_true_si_alguna_columna_de_estado_esta_vacia()
-    test_hay_pendientes_false_si_las_4_columnas_ya_tienen_algun_valor()
-    test_hay_pendientes_false_si_no_hay_filas_con_dni()
-    test_hay_pendientes_ignora_filas_sin_dni()
-    test_hay_pendientes_false_si_url_vacia()
-    test_hay_pendientes_false_si_falla_la_lectura()
-    test_decidir_lane_usa_a_si_tiene_pendientes()
-    test_decidir_lane_usa_b_si_a_no_tiene_pendientes_y_b_si()
-    test_decidir_lane_none_si_ninguna_tiene_pendientes()
-    test_decidir_lane_none_si_b_no_esta_configurada_y_a_no_tiene_pendientes()
-    test_hay_pendientes_prefiere_api_cuando_hay_credenciales()
-    test_hay_pendientes_cae_a_csv_si_la_api_falla()
-    test_hay_pendientes_usa_csv_si_no_hay_credenciales()
+    test_hay_en_proceso_false_cuando_todo_resuelto_o_pendiente()
+    test_hay_en_proceso_true_si_alguna_columna_esta_en_proceso()
+    test_hay_en_proceso_false_si_url_vacia()
+    test_hay_en_proceso_false_si_falla_la_lectura()
+    test_decidir_lane_usa_a_si_no_esta_en_proceso()
+    test_decidir_lane_usa_b_si_a_esta_en_proceso_aunque_b_no_tenga_dnis()
+    test_decidir_lane_usa_b_aunque_a_tenga_trabajo_pendiente_real()
+    test_decidir_lane_none_si_a_en_proceso_y_b_no_configurada()
+    test_hay_en_proceso_prefiere_api_cuando_hay_credenciales()
+    test_hay_en_proceso_cae_a_csv_si_la_api_falla()
+    test_hay_en_proceso_usa_csv_si_no_hay_credenciales()
     print("OK - test_workbook_lock")

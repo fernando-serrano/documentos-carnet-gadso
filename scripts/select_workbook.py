@@ -1,10 +1,11 @@
 """CLI: decide que lane (A/B) de la cola compartida BOT DOCUMENTOS usar en esta corrida.
 
-Imprime 'A' o 'B' a stdout y sale con codigo 0 si esa lane tiene DNIs
-pendientes (fila con DNI y alguna columna de estado todavia vacia). Si
-ninguna de las 2 lanes tiene pendientes (o no se pudieron leer), no imprime
-nada util y sale con codigo 3 -- no es necesariamente un error, puede ser
-que simplemente no haya nada que procesar hoy. No escribe en ninguna hoja.
+Regla binaria: si la lane A tiene CUALQUIER fila EN PROCESO, se usa B sin mas
+condiciones (sin importar si a A le queda trabajo pendiente real o si B
+tiene DNIs cargados); si A no esta en proceso, se usa A. Imprime 'A' o 'B' a
+stdout y sale con codigo 0. Si A esta en proceso y GALENIUS_QUEUE_SHEET_URL_B
+no esta configurada, no imprime nada util y sale con codigo 3. No escribe en
+ninguna hoja.
 
 Uso (desde run.bat):
     for /f "delims=" %%W in ('".venv\\Scripts\\python.exe" scripts\\select_workbook.py') do set "ACTIVE_WORKBOOK=%%W"
@@ -27,7 +28,7 @@ def main() -> int:
     load_dotenv()
     lane = decidir_lane()
     if lane is None:
-        print("[SELECT_WORKBOOK] Ninguna lane tiene DNIs pendientes (o no se pudieron leer).", file=sys.stderr)
+        print("[SELECT_WORKBOOK] Lane A esta en proceso y GALENIUS_QUEUE_SHEET_URL_B no esta configurada.", file=sys.stderr)
         return 3
 
     print(lane)

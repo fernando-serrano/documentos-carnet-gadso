@@ -18,7 +18,7 @@ if defined GLOBAL_LOTE_DIR exit /b 0
 set "ACTIVE_WORKBOOK="
 for /f "delims=" %%W in ('".venv\Scripts\python.exe" scripts\select_workbook.py') do set "ACTIVE_WORKBOOK=%%W"
 if not defined ACTIVE_WORKBOOK (
-  echo [RUN] Ninguna lane tiene DNIs pendientes por ahora. Nada que ejecutar.
+  echo [ERROR] Lane A esta en proceso y GALENIUS_QUEUE_SHEET_URL_B no esta configurada.
   exit /b 3
 )
 echo [RUN] Lane activa: %ACTIVE_WORKBOOK%

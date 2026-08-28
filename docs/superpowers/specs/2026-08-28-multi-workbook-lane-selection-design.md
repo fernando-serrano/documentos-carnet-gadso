@@ -2,12 +2,13 @@
 
 Fecha: 2026-08-28
 Autor: Fernando Serrano (con Claude Code)
-Estado: Implementado. Ver "Actualización 2026-08-28" al final — el criterio
-de disponibilidad de una lane cambió de "¿tiene EN PROCESO?" (con
-vencimiento) a "¿le quedan filas con DNI y alguna columna de estado
-vacía?", más simple y sin necesitar vencimiento. El resto del documento
-describe el diseño original (útil como contexto), pero el mecanismo real
-en producción es el de la actualización.
+Estado: Implementado. El criterio pasó por 3 iteraciones (ver
+"Actualización 2026-08-28" al final): EN PROCESO + vencimiento por tiempo →
+filas pendientes por columna → **regla binaria final**: si A tiene
+CUALQUIER fila EN PROCESO, se usa B sin más condiciones (sin importar si a
+A le queda trabajo real pendiente o si B tiene DNIs cargados); si A no está
+en proceso, se usa A. El resto del documento describe el diseño original
+(útil como contexto), pero el mecanismo real en producción es el binario.
 
 ## 1. Contexto y problema
 
@@ -235,3 +236,25 @@ porque simplemente no hay trabajo nuevo.
 Esto es más simple y no requiere vencimiento: una fila colgada en
 `EN PROCESO` ya no bloquea la lane completa, porque el resto de sus columnas
 normalmente siguen vacías (trabajo real pendiente para los otros 3 flujos).
+
+## Actualización 2026-08-28 (2): regla binaria final
+
+En la práctica, la regla de "filas pendientes por columna" seguía dejando a
+A activa aunque tuviera filas `EN PROCESO` colgadas (porque otras columnas
+de esas mismas filas, u otras filas, seguían con trabajo real pendiente) —
+contradiciendo la intención original: si alguien (u otro dispositivo) está
+trabajando A ahora mismo, no se debe tocar A en esta corrida, punto.
+
+**Regla final (commit siguiente a `21634f3`):** vuelve a ser una detección
+directa de `EN PROCESO` (sin vencimiento por tiempo, sin mirar si a A "le
+queda trabajo" o si B tiene DNIs cargados):
+
+- Si A tiene **cualquier** fila `EN PROCESO` en cualquiera de las 4 columnas
+  → se usa B, sin más condiciones.
+- Si A no tiene ninguna → se usa A.
+- Si A está en proceso y `GALENIUS_QUEUE_SHEET_URL_B` no está configurada →
+  `decidir_lane()` devuelve `None` y `run.bat` aborta con error.
+
+No hay punto medio ni casos "B vacía pero se usa igual" o "A incompleta pero
+se sigue usando" — es una decisión binaria sobre un solo hecho: ¿A está en
+proceso ahora mismo, sí o no?

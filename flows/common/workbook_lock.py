@@ -4,10 +4,9 @@ Las 4 columnas de estado que escriben los flujos viven en la MISMA fila de la
 cola compartida (una pestaña de Google Sheets por lane). Este módulo solo lee
 esas columnas — nunca escribe una celda.
 
-Una lane esta disponible si le quedan filas con DNI y con al menos una de las
-4 columnas de estado todavia vacia (nunca tocada por ningun flujo). El
-resultado de una fila ya trabajada (exito, error, o en proceso) no importa
-para esta decision — eso lo gestiona quien revisa la hoja.
+Regla binaria, sin punto medio: si la lane A tiene CUALQUIER fila marcada
+EN PROCESO, se usa B — sin importar si A todavia tiene trabajo pendiente real
+o si B tiene o no DNIs cargados. Si A no esta en proceso, se usa A.
 """
 from __future__ import annotations
 
@@ -22,11 +21,12 @@ _READ_SETTINGS = {
     "retry_base_ms": 600,
 }
 
-_ESTADO_COLUMNAS_CANDIDATOS: list[list[str]] = [
-    ["ESTADO CERTIFICADO MEDICO", "ESTADO CERTIFICADO MÉDICO"],
-    ["ESTADO FOTO CARNÉ", "ESTADO FOTO CARNE"],
-    ["ESTADO DJ FUT"],
-    ["ESTADO FIRMA", "ESTADO FIRMA DIGITAL"],
+# (candidatos de nombre de columna, env var con el prefijo "en proceso" de ese flujo)
+_ESTADO_COLUMNAS: list[tuple[list[str], str]] = [
+    (["ESTADO CERTIFICADO MEDICO", "ESTADO CERTIFICADO MÉDICO"], "GALENIUS_ESTADO_EN_PROCESO"),
+    (["ESTADO FOTO CARNÉ", "ESTADO FOTO CARNE"], "FOTO_CARNE_ESTADO_EN_PROCESO"),
+    (["ESTADO DJ FUT"], "DJ_FUT_ESTADO_EN_PROCESO"),
+    (["ESTADO FIRMA", "ESTADO FIRMA DIGITAL"], "FIRMA_DIGITAL_ESTADO_EN_PROCESO"),
 ]
 
 
@@ -47,8 +47,11 @@ def _leer_cola_actual(queue_url: str) -> tuple[list[dict], list[str]] | None:
         return None
 
 
-def hay_pendientes(queue_url: str) -> bool:
-    """True si la cola tiene alguna fila con DNI y al menos una columna de estado vacia."""
+def hay_en_proceso(queue_url: str) -> bool:
+    """True si la cola tiene alguna fila EN PROCESO en cualquiera de las 4 columnas.
+
+    Si la URL esta vacia o no se pudo leer la hoja, se responde False (no
+    romper el flujo normal: por defecto se sigue usando la lane A)."""
     url = str(queue_url or "").strip()
     if not url:
         return False
@@ -58,35 +61,27 @@ def hay_pendientes(queue_url: str) -> bool:
         return False
     rows, fieldnames = resultado
 
-    dni_col = _sheets.resolver_columna(fieldnames, ["DNI"])
-    if not dni_col:
-        return False
-
-    columnas_estado = [
-        columna
-        for candidatos in _ESTADO_COLUMNAS_CANDIDATOS
-        if (columna := _sheets.resolver_columna(fieldnames, candidatos))
-    ]
-    if not columnas_estado:
-        return False
-
-    for row in rows:
-        dni = str(row.get(dni_col, "") or "").strip()
-        if not dni:
+    for candidatos, env_var in _ESTADO_COLUMNAS:
+        columna = _sheets.resolver_columna(fieldnames, candidatos)
+        if not columna:
             continue
-        if any(not str(row.get(columna, "") or "").strip() for columna in columnas_estado):
-            return True
+        prefijo = _sheets.normalizar_columna(os.getenv(env_var, "EN PROCESO"))
+        if not prefijo:
+            continue
+        for row in rows:
+            valor = _sheets.normalizar_columna(str(row.get(columna, "") or ""))
+            if valor and valor.startswith(prefijo):
+                return True
 
     return False
 
 
 def decidir_lane() -> str | None:
-    """Devuelve 'A' o 'B' segun cual tenga filas pendientes; None si ninguna tiene."""
+    """Devuelve 'A' si no esta en proceso; 'B' si A esta en proceso y B esta
+    configurada; None si A esta en proceso y no hay B configurada."""
     url_a = str(os.getenv("GALENIUS_QUEUE_SHEET_URL", "")).strip()
     url_b = str(os.getenv("GALENIUS_QUEUE_SHEET_URL_B", "")).strip()
 
-    if hay_pendientes(url_a):
+    if not hay_en_proceso(url_a):
         return "A"
-    if hay_pendientes(url_b):
-        return "B"
-    return None
+    return "B" if url_b else None
