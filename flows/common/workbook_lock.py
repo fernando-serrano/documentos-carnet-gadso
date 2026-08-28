@@ -3,11 +3,15 @@
 Las 4 columnas de estado que escriben los flujos viven en la MISMA fila de la
 cola compartida (una pestaña de Google Sheets por lane). Este módulo solo lee
 esas columnas — nunca escribe una celda.
+
+Una lane esta disponible si le quedan filas con DNI y con al menos una de las
+4 columnas de estado todavia vacia (nunca tocada por ningun flujo). El
+resultado de una fila ya trabajada (exito, error, o en proceso) no importa
+para esta decision — eso lo gestiona quien revisa la hoja.
 """
 from __future__ import annotations
 
 import os
-from datetime import datetime
 
 from . import sheets as _sheets
 
@@ -18,30 +22,12 @@ _READ_SETTINGS = {
     "retry_base_ms": 600,
 }
 
-# (candidatos de nombre de columna, env var con el prefijo "en proceso" de ese flujo)
-_ESTADO_COLUMNAS: list[tuple[list[str], str]] = [
-    (["ESTADO CERTIFICADO MEDICO", "ESTADO CERTIFICADO MÉDICO"], "GALENIUS_ESTADO_EN_PROCESO"),
-    (["ESTADO FOTO CARNÉ", "ESTADO FOTO CARNE"], "FOTO_CARNE_ESTADO_EN_PROCESO"),
-    (["ESTADO DJ FUT"], "DJ_FUT_ESTADO_EN_PROCESO"),
-    (["ESTADO FIRMA", "ESTADO FIRMA DIGITAL"], "FIRMA_DIGITAL_ESTADO_EN_PROCESO"),
+_ESTADO_COLUMNAS_CANDIDATOS: list[list[str]] = [
+    ["ESTADO CERTIFICADO MEDICO", "ESTADO CERTIFICADO MÉDICO"],
+    ["ESTADO FOTO CARNÉ", "ESTADO FOTO CARNE"],
+    ["ESTADO DJ FUT"],
+    ["ESTADO FIRMA", "ESTADO FIRMA DIGITAL"],
 ]
-
-_FECHA_TRAMITE_CANDIDATOS = ["FECHA TRAMITE", "FECHA TRÁMITE"]
-_FECHA_TRAMITE_FORMATO = "%d/%m/%Y %H:%M:%S"
-
-
-def _en_proceso_sigue_vigente(valor_fecha: str, stale_minutes: int) -> bool:
-    """True si la marca EN PROCESO todavia cuenta como ocupada (reciente o sin fecha
-    confiable). False solo si hay una FECHA TRAMITE parseable mas vieja que el limite."""
-    texto = str(valor_fecha or "").strip()
-    if not texto:
-        return True
-    try:
-        marcado_en = datetime.strptime(texto, _FECHA_TRAMITE_FORMATO)
-    except ValueError:
-        return True
-    minutos_transcurridos = (datetime.now() - marcado_en).total_seconds() / 60.0
-    return minutos_transcurridos < stale_minutes
 
 
 def _leer_cola_actual(queue_url: str) -> tuple[list[dict], list[str]] | None:
@@ -61,45 +47,46 @@ def _leer_cola_actual(queue_url: str) -> tuple[list[dict], list[str]] | None:
         return None
 
 
-def hay_registros_en_proceso(queue_url: str) -> bool:
-    """True si la cola tiene alguna fila EN PROCESO, o si no se pudo confirmar que está libre."""
+def hay_pendientes(queue_url: str) -> bool:
+    """True si la cola tiene alguna fila con DNI y al menos una columna de estado vacia."""
     url = str(queue_url or "").strip()
     if not url:
-        return True
+        return False
 
     resultado = _leer_cola_actual(url)
     if resultado is None:
-        return True
+        return False
     rows, fieldnames = resultado
 
-    stale_minutes = max(1, int(str(os.getenv("WORKBOOK_LOCK_STALE_MINUTES", "30") or "30").strip() or "30"))
-    fecha_col = _sheets.resolver_columna(fieldnames, _FECHA_TRAMITE_CANDIDATOS)
+    dni_col = _sheets.resolver_columna(fieldnames, ["DNI"])
+    if not dni_col:
+        return False
 
-    for candidatos, env_var in _ESTADO_COLUMNAS:
-        columna = _sheets.resolver_columna(fieldnames, candidatos)
-        if not columna:
+    columnas_estado = [
+        columna
+        for candidatos in _ESTADO_COLUMNAS_CANDIDATOS
+        if (columna := _sheets.resolver_columna(fieldnames, candidatos))
+    ]
+    if not columnas_estado:
+        return False
+
+    for row in rows:
+        dni = str(row.get(dni_col, "") or "").strip()
+        if not dni:
             continue
-        prefijo = _sheets.normalizar_columna(os.getenv(env_var, "EN PROCESO"))
-        if not prefijo:
-            continue
-        for row in rows:
-            valor = _sheets.normalizar_columna(str(row.get(columna, "") or ""))
-            if not valor or not valor.startswith(prefijo):
-                continue
-            fecha_valor = row.get(fecha_col, "") if fecha_col else ""
-            if _en_proceso_sigue_vigente(fecha_valor, stale_minutes):
-                return True
+        if any(not str(row.get(columna, "") or "").strip() for columna in columnas_estado):
+            return True
 
     return False
 
 
 def decidir_lane() -> str | None:
-    """Devuelve 'A', 'B', o None si ambas lanes están ocupadas/no disponibles."""
+    """Devuelve 'A' o 'B' segun cual tenga filas pendientes; None si ninguna tiene."""
     url_a = str(os.getenv("GALENIUS_QUEUE_SHEET_URL", "")).strip()
     url_b = str(os.getenv("GALENIUS_QUEUE_SHEET_URL_B", "")).strip()
 
-    if not hay_registros_en_proceso(url_a):
+    if hay_pendientes(url_a):
         return "A"
-    if not hay_registros_en_proceso(url_b):
+    if hay_pendientes(url_b):
         return "B"
     return None

@@ -92,7 +92,7 @@ copy ejemplos\.env.galenius.example .env
 
 Como minimo, completar `GALENIUS_URL_LOGIN`, `GALENIUS_USERNAME` y `GALENIUS_PASSWORD` (ver la seccion **Variables Minimas**). Para los flujos que usan Google Drive/Sheets, configurar tambien las credenciales correspondientes (`DRIVE_CREDENTIALS_JSON` y derivadas).
 
-Si vas a correr `run.bat` en 2 dispositivos a la vez, configura ademas `GALENIUS_QUEUE_SHEET_URL_B` con la pestana alterna de la cola BOT DOCUMENTOS (mismo spreadsheet, otro `gid`). Antes de arrancar cualquier flujo, `run.bat` revisa si la cola principal ya tiene registros `EN PROCESO`: si los tiene, usa automaticamente la cola `_B`; si ambas estan ocupadas, aborta la corrida y avisa por correo (si `MS_GRAPH_MAIL_ENABLED=1`). Una marca `EN PROCESO` deja de contar como "ocupado" despues de `WORKBOOK_LOCK_STALE_MINUTES` minutos (default 30) sin actualizarse, para que una corrida interrumpida no bloquee la cola para siempre.
+Si vas a correr `run.bat` en 2 dispositivos a la vez, configura ademas `GALENIUS_QUEUE_SHEET_URL_B` con la pestana alterna de la cola BOT DOCUMENTOS (mismo spreadsheet, otro `gid`). Antes de arrancar cualquier flujo, `run.bat` revisa si la cola principal todavia tiene filas con DNI y alguna columna de estado vacia (pendientes de verdad, sin importar si otras filas ya quedaron con exito, error o en proceso): si no le queda ninguna, usa automaticamente la cola `_B`; si ninguna de las 2 tiene pendientes, la corrida termina sin ejecutar nada (no es un error, solo no hay trabajo nuevo).
 
 ### 8. Ejecutar el flujo
 
