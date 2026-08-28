@@ -1,0 +1,64 @@
+"""Decide qué lane (A/B) de la cola compartida BOT DOCUMENTOS usar en esta corrida.
+
+Las 4 columnas de estado que escriben los flujos viven en la MISMA fila de la
+cola compartida (una pestaña de Google Sheets por lane). Este módulo solo lee
+esas columnas — nunca escribe una celda.
+"""
+from __future__ import annotations
+
+import os
+
+from . import sheets as _sheets
+
+_READ_SETTINGS = {
+    "user_agent": "Mozilla/5.0 (compatible; workbook-lock/1.0)",
+    "retries": 4,
+    "timeout_sec": 25,
+    "retry_base_ms": 600,
+}
+
+# (candidatos de nombre de columna, env var con el prefijo "en proceso" de ese flujo)
+_ESTADO_COLUMNAS: list[tuple[list[str], str]] = [
+    (["ESTADO CERTIFICADO MEDICO", "ESTADO CERTIFICADO MÉDICO"], "GALENIUS_ESTADO_EN_PROCESO"),
+    (["ESTADO FOTO CARNÉ", "ESTADO FOTO CARNE"], "FOTO_CARNE_ESTADO_EN_PROCESO"),
+    (["ESTADO DJ FUT"], "DJ_FUT_ESTADO_EN_PROCESO"),
+    (["ESTADO FIRMA", "ESTADO FIRMA DIGITAL"], "FIRMA_DIGITAL_ESTADO_EN_PROCESO"),
+]
+
+
+def hay_registros_en_proceso(queue_url: str) -> bool:
+    """True si la cola tiene alguna fila EN PROCESO, o si no se pudo confirmar que está libre."""
+    url = str(queue_url or "").strip()
+    if not url:
+        return True
+
+    try:
+        rows, fieldnames = _sheets.read_sheet_rows(url, **_READ_SETTINGS)
+    except Exception:
+        return True
+
+    for candidatos, env_var in _ESTADO_COLUMNAS:
+        columna = _sheets.resolver_columna(fieldnames, candidatos)
+        if not columna:
+            continue
+        prefijo = _sheets.normalizar_columna(os.getenv(env_var, "EN PROCESO"))
+        if not prefijo:
+            continue
+        for row in rows:
+            valor = _sheets.normalizar_columna(str(row.get(columna, "") or ""))
+            if valor and valor.startswith(prefijo):
+                return True
+
+    return False
+
+
+def decidir_lane() -> str | None:
+    """Devuelve 'A', 'B', o None si ambas lanes están ocupadas/no disponibles."""
+    url_a = str(os.getenv("GALENIUS_QUEUE_SHEET_URL", "")).strip()
+    url_b = str(os.getenv("GALENIUS_QUEUE_SHEET_URL_B", "")).strip()
+
+    if not hay_registros_en_proceso(url_a):
+        return "A"
+    if not hay_registros_en_proceso(url_b):
+        return "B"
+    return None
