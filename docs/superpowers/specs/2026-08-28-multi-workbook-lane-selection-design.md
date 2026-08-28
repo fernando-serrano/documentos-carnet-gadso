@@ -2,7 +2,12 @@
 
 Fecha: 2026-08-28
 Autor: Fernando Serrano (con Claude Code)
-Estado: Aprobado en chat, pendiente de escritura de plan de implementación
+Estado: Implementado. Ver "Actualización 2026-08-28" al final — el criterio
+de disponibilidad de una lane cambió de "¿tiene EN PROCESO?" (con
+vencimiento) a "¿le quedan filas con DNI y alguna columna de estado
+vacía?", más simple y sin necesitar vencimiento. El resto del documento
+describe el diseño original (útil como contexto), pero el mecanismo real
+en producción es el de la actualización.
 
 ## 1. Contexto y problema
 
@@ -202,3 +207,31 @@ los tests.
   confirmar que detecta y salta a B.
 - Prueba manual de `run.bat` completo con `ACTIVE_WORKBOOK` forzado a `B` para
   confirmar que los 4 flujos leen/escriben en las URLs `_B`.
+
+## Actualización 2026-08-28: de "EN PROCESO + vencimiento" a "filas pendientes"
+
+Tras implementar el diseño original se detectaron dos problemas en uso real:
+
+1. **Falsos positivos de "ambas ocupadas".** Una corrida interrumpida (dos
+   dispositivos compitiendo por la misma cuota de Google API) dejó filas
+   colgadas en `EN PROCESO` para siempre — bloqueando esa lane hasta que
+   alguien las resolviera a mano en la hoja. Se probó un vencimiento
+   (`WORKBOOK_LOCK_STALE_MINUTES`, ver commit `1198b60`) comparando contra la
+   columna `FECHA TRAMITE`, pero añadía una variable más que ajustar y seguía
+   dependiendo de adivinar un tiempo "razonable".
+2. **Lane B elegida sin nada que hacer.** Si A tenía marcas `EN PROCESO`
+   (aunque estuvieran resueltas o no) y B estaba vacía, el sistema igual
+   saltaba a B y corría los 4 flujos sobre una cola sin DNIs.
+
+**Nuevo criterio (commit `21634f3`):** una lane está disponible si le queda
+alguna fila con DNI y **al menos una de las 4 columnas de estado todavía
+vacía** (nunca tocada por ningún flujo). El resultado de una fila ya
+trabajada — éxito, error, o en proceso — no importa para esta decisión; eso
+lo gestiona quien revisa la hoja vía observación/estado, no el selector de
+lane. Si ninguna de las 2 lanes tiene pendientes, la corrida termina sin
+ejecutar nada — ya no se trata como error ni se envía correo de aviso,
+porque simplemente no hay trabajo nuevo.
+
+Esto es más simple y no requiere vencimiento: una fila colgada en
+`EN PROCESO` ya no bloquea la lane completa, porque el resto de sus columnas
+normalmente siguen vacías (trabajo real pendiente para los otros 3 flujos).
