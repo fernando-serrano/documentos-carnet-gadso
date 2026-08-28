@@ -14,6 +14,15 @@ exit /b 2
 
 :prepare_shared_lote
 if defined GLOBAL_LOTE_DIR exit /b 0
+
+set "ACTIVE_WORKBOOK="
+for /f "delims=" %%W in ('".venv\Scripts\python.exe" scripts\select_workbook.py') do set "ACTIVE_WORKBOOK=%%W"
+if not defined ACTIVE_WORKBOOK (
+  echo [ERROR] No se pudo determinar la cola activa: ambas lanes ^(A/B^) estan ocupadas o hubo un error.
+  exit /b 3
+)
+echo [RUN] Lane activa: %ACTIVE_WORKBOOK%
+
 set "RUN_TS="
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format 'dd-MM-yyyy-HH-mm-ss'"') do set "RUN_TS=%%i"
 echo(%RUN_TS%| findstr /r "^[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9]$" >nul || set "RUN_TS="
