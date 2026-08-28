@@ -222,6 +222,33 @@ def _resolver_lote_dir_compartido(base_dir: Path) -> Path | None:
     return lote_dir
 
 
+def _construir_queue_items_pendientes(
+    queue_rows: list[dict],
+    fieldnames: list[str],
+    cfg: FirmaDigitalConfig,
+) -> list[tuple[str, int]]:
+    columnas = resolve_sheet_columns(fieldnames)
+    dni_col = columnas.get("dni") or "DNI"
+    estado_col = _resolver_columna_existente(fieldnames, [cfg.estado_column, "ESTADO FIRMA", "ESTADO FIRMA DIGITAL"])
+    estados_finales = {
+        cfg.estado_procesado.upper(),
+        cfg.estado_cargado.upper(),
+        cfg.estado_revision_manual.upper(),
+        cfg.estado_error.upper(),
+        cfg.estado_sin_registros.upper(),
+    }
+
+    queue_items: list[tuple[str, int]] = []
+    for row in queue_rows:
+        dni = str(row.get(dni_col, "") or "").strip()
+        dni_digits = "".join(ch for ch in dni if ch.isdigit())
+        row_number = int(row.get("__row_number__", 0) or 0)
+        estado = str(row.get(estado_col, "") or "").strip().upper() if estado_col else ""
+        if dni_digits and row_number and estado not in estados_finales:
+            queue_items.append((dni_digits, row_number))
+    return queue_items
+
+
 def _worker_firma_digital(
     worker_id: int,
     cfg: FirmaDigitalConfig,
@@ -405,16 +432,7 @@ def main() -> int:
     logger.info("[FIRMA DIGITAL] Cola source=%s | fuente=%s", cfg.queue_sheet_url, cfg.source_sheet_url)
     firma_source_map = cargar_fuente_firma_por_dni(cfg.source_sheet_url, logger)
     queue_rows, fieldnames = read_google_sheet_rows(cfg.queue_sheet_url)
-    columnas = resolve_sheet_columns(fieldnames)
-    dni_col = columnas.get("dni") or "DNI"
-
-    queue_items: list[tuple[str, int]] = []
-    for row in queue_rows:
-        dni = str(row.get(dni_col, "") or "").strip()
-        dni_digits = "".join(ch for ch in dni if ch.isdigit())
-        row_number = int(row.get("__row_number__", 0) or 0)
-        if dni_digits and row_number:
-            queue_items.append((dni_digits, row_number))
+    queue_items = _construir_queue_items_pendientes(queue_rows, fieldnames, cfg)
 
     logger.info("[FIRMA DIGITAL] Cola cargada | filas=%s | filas_validas=%s", len(queue_rows), len(queue_items))
 
