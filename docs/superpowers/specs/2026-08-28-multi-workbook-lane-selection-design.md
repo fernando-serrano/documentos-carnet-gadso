@@ -29,22 +29,28 @@ foto de la cola antes de que el otro haya marcado nada: se duplica el
 procesamiento de los mismos DNI o falla la escritura porque la fila ya fue
 modificada por el otro dispositivo.
 
-Para mitigar esto se habilitó un segundo workbook completo (mismo esquema de
-pestañas y campos que el original) en Google Sheets, pensado como una
-"segunda cola" a la que un dispositivo puede saltar si detecta que el
-workbook principal ya está siendo trabajado.
+Para mitigar esto se habilitó una **segunda pestaña dentro del mismo
+spreadsheet** (mismo ID de archivo, `1C-V6wNGXQEVfncbldOQfhDKT7Qwuk2BV6Y_gnV5-O4U`,
+distinto `gid`: la pestaña actual es `gid=214579984` y la nueva es
+`gid=1779457178`), con los mismos campos que la cola actual, pensada como una
+"segunda cola" (lane B) a la que un dispositivo puede saltar si detecta que
+la cola principal (lane A) ya está siendo trabajada. Las hojas "fuente" de
+cada flujo (fotos, documentos DJ FUT, firma) no se duplican — son el mismo
+catálogo de referencia para ambas colas, y no son donde ocurre la colisión
+(la colisión es únicamente sobre las columnas de estado de la cola).
 
 ## 2. Objetivo
 
 Antes de que un `run.bat` arranque cualquiera de los 4 flujos, decidir **una
-sola vez, para toda la corrida**, cuál de los 2 workbooks usar:
+sola vez, para toda la corrida**, cuál de las 2 pestañas de cola (lane A o
+lane B, mismo spreadsheet, distinto `gid`) usar:
 
-- Si el workbook A (el actual/production) no tiene ninguna fila marcada
-  `EN PROCESO` en ninguna de sus 4 columnas de estado → usar A (comportamiento
-  actual, sin cambios).
-- Si A tiene registros en proceso → revisar el workbook B. Si B está libre →
-  usar B.
-- Si **ambos** están ocupados → abortar la corrida completa sin tocar ninguna
+- Si la lane A (`gid=214579984`, la actual/production) no tiene ninguna fila
+  marcada `EN PROCESO` en ninguna de sus 4 columnas de estado → usar A
+  (comportamiento actual, sin cambios).
+- Si A tiene registros en proceso → revisar la lane B (`gid=1779457178`). Si B
+  está libre → usar B.
+- Si **ambas** están ocupadas → abortar la corrida completa sin tocar ninguna
   hoja, y enviar un correo de aviso por el mismo canal que ya usa el proyecto
   para notificaciones (Microsoft Graph).
 
@@ -55,9 +61,12 @@ sola vez, para toda la corrida**, cuál de los 2 workbooks usar:
 - No se implementa reclamo atómico por fila (optimistic lock estilo
   `_intentar_reservar_registro_compare` de `ejemplos/carnet_emision.py`). Es
   una mejora conocida para un futuro; queda fuera de este alcance porque el
-  usuario pidió específicamente el mecanismo de selección de workbook.
-- No se decide el workbook por flujo individual — la decisión es una sola
-  para los 4 flujos de esa corrida (confirmado con el usuario).
+  usuario pidió específicamente el mecanismo de selección de lane.
+- No se decide la lane por flujo individual — la decisión es una sola para
+  los 4 flujos de esa corrida (confirmado con el usuario).
+- No se duplican las hojas "fuente" de cada flujo — siguen siendo las mismas
+  para ambas lanes (confirmado: la lane B es una pestaña nueva en el mismo
+  spreadsheet, no un archivo separado).
 - No se resuelve el caso de arranques simultáneos exactos (ambos dispositivos
   leen "A libre" en el mismo instante). Es una ventana de carrera que ya
   existía y que este diseño no elimina del todo — solo reduce drásticamente
@@ -73,7 +82,7 @@ flujo (dentro de `:prepare_shared_lote`, antes de `run_galenius.bat`).
 Responsabilidades:
 
 1. Cargar `.env` (igual que los `run_*.py`).
-2. Para el workbook A: leer la cola (`GALENIUS_QUEUE_SHEET_URL`) con
+2. Para la lane A: leer la cola (`GALENIUS_QUEUE_SHEET_URL`) con
    `flows.common.sheets.read_sheet_rows` (lectura pública vía CSV export, sin
    credenciales de escritura) y revisar las 4 columnas de estado listadas en
    §1. Se considera "en proceso" cualquier valor cuya versión normalizada
@@ -81,10 +90,10 @@ Responsabilidades:
    valor normalizado de la env var `*_ESTADO_EN_PROCESO` correspondiente
    (para tolerar sufijos como `EN PROCESO W1`).
 3. Si A no tiene ninguna fila en proceso → imprimir `A` a stdout, exit 0.
-4. Si A tiene alguna → repetir el mismo chequeo sobre el workbook B, usando
-   las variables de entorno `*_B` (ver §4.2). Si B falta configurar
-   (`GALENIUS_QUEUE_SHEET_URL_B` vacío) se trata como "no disponible" →
-   pasa directo al caso de aborto (§4.3), registrando el motivo.
+4. Si A tiene alguna → repetir el mismo chequeo sobre la lane B, usando la
+   variable de entorno `GALENIUS_QUEUE_SHEET_URL_B` (ver §4.2). Si B falta
+   configurar (variable vacía) se trata como "no disponible" → pasa directo
+   al caso de aborto (§4.3), registrando el motivo.
 5. Si B está libre → imprimir `B` a stdout, exit 0.
 6. Si B también tiene registros en proceso (o no está configurado) → aborto
    (§4.3): imprimir nada útil a stdout, exit code `3`.
@@ -93,23 +102,22 @@ Este script es puramente de lectura salvo el envío de correo en el caso de
 aborto — no escribe en ninguna hoja, así que no hay riesgo de dejar un
 estado a medio escribir si falla a mitad de camino.
 
-### 4.2 Variables `.env` nuevas (workbook B)
+### 4.2 Variable `.env` nueva (lane B)
 
-Mismos nombres que las URLs existentes, con sufijo `_B`:
+Una sola variable obligatoria, mismo patrón que la existente con sufijo `_B`:
 
-- `GALENIUS_QUEUE_SHEET_URL_B` (cola compartida del workbook B; los otros 3
-  flujos caen a esta por defecto, igual que hoy con la A).
-- `FOTO_CARNE_SOURCE_SHEET_URL_B`
-- `DJ_FUT_SOURCE_SHEET_URL_B`
-- `FIRMA_DIGITAL_SOURCE_SHEET_URL_B`
+- `GALENIUS_QUEUE_SHEET_URL_B` = `https://docs.google.com/spreadsheets/d/1C-V6wNGXQEVfncbldOQfhDKT7Qwuk2BV6Y_gnV5-O4U/edit?gid=1779457178#gid=1779457178`
+  (la cola compartida de la lane B; los otros 3 flujos caen a esta por
+  defecto, igual que hoy con la lane A vía `GALENIUS_QUEUE_SHEET_URL`).
 
-Opcional (si en el futuro algún flujo deja de compartir cola con Galenius):
+Opcional (mismo patrón de override que ya existe hoy para la lane A, por si
+algún flujo alguna vez deja de compartir cola con Galenius):
 `FOTO_CARNE_QUEUE_SHEET_URL_B`, `DJ_FUT_QUEUE_SHEET_URL_B`,
-`FIRMA_DIGITAL_QUEUE_SHEET_URL_B` — con el mismo fallback a
-`GALENIUS_QUEUE_SHEET_URL_B` que ya usan sus contrapartes A.
+`FIRMA_DIGITAL_QUEUE_SHEET_URL_B`.
 
-El usuario debe rellenar estas URLs con las pestañas reales del workbook B
-provisto.
+No hace falta ninguna variante `_B` de las hojas fuente (`FOTO_CARNE_SOURCE_SHEET_URL`,
+`DJ_FUT_SOURCE_SHEET_URL`, `FIRMA_DIGITAL_SOURCE_SHEET_URL`) — son las mismas
+para ambas lanes (§3).
 
 ### 4.3 Aborto por ambos workbooks ocupados
 
@@ -143,19 +151,22 @@ después, sin tocar el resto de `run.bat`.
 ### 4.5 Cambio mínimo en cada `load_*_config()`
 
 Cada loader (`load_foto_carne_config`, `load_galenius_config`, análogos en
-DJ FUT/Firma Digital) ya arma sus URLs con el patrón:
+DJ FUT/Firma Digital) ya arma su URL de **cola** con el patrón:
 
 ```python
 queue_sheet_url = str(os.getenv("FOTO_CARNE_QUEUE_SHEET_URL", os.getenv("GALENIUS_QUEUE_SHEET_URL", ""))).strip()
-source_sheet_url = str(os.getenv("FOTO_CARNE_SOURCE_SHEET_URL", "")).strip()
 ```
 
-Se agrega, antes de resolver cada URL, un sufijo condicional:
+(en `flows/galenius_flow/config.py` es un poco distinto porque Galenius es la
+fuente del fallback: `queue_sheet_url = str(os.getenv("GALENIUS_QUEUE_SHEET_URL", <default hardcodeado>)).strip()`).
+
+Se agrega, antes de resolver la URL de cola, un sufijo condicional — **solo
+afecta la cola, nunca la hoja fuente** (`source_sheet_url` queda intacta en
+los 4 loaders):
 
 ```python
 suffix = "_B" if os.getenv("ACTIVE_WORKBOOK", "A").strip().upper() == "B" else ""
 queue_sheet_url = str(os.getenv(f"FOTO_CARNE_QUEUE_SHEET_URL{suffix}", os.getenv(f"GALENIUS_QUEUE_SHEET_URL{suffix}", ""))).strip()
-source_sheet_url = str(os.getenv(f"FOTO_CARNE_SOURCE_SHEET_URL{suffix}", "")).strip()
 ```
 
 Es aditivo: sin `ACTIVE_WORKBOOK` seteado (o con valor `A`), el

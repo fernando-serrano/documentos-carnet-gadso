@@ -92,6 +92,8 @@ copy ejemplos\.env.galenius.example .env
 
 Como minimo, completar `GALENIUS_URL_LOGIN`, `GALENIUS_USERNAME` y `GALENIUS_PASSWORD` (ver la seccion **Variables Minimas**). Para los flujos que usan Google Drive/Sheets, configurar tambien las credenciales correspondientes (`DRIVE_CREDENTIALS_JSON` y derivadas).
 
+Si vas a correr `run.bat` en 2 dispositivos a la vez, configura ademas `GALENIUS_QUEUE_SHEET_URL_B` con la pestana alterna de la cola BOT DOCUMENTOS (mismo spreadsheet, otro `gid`). Antes de arrancar cualquier flujo, `run.bat` revisa si la cola principal ya tiene registros `EN PROCESO`: si los tiene, usa automaticamente la cola `_B`; si ambas estan ocupadas, aborta la corrida y avisa por correo (si `MS_GRAPH_MAIL_ENABLED=1`).
+
 ### 8. Ejecutar el flujo
 
 Con el entorno virtual activo, lanzar el flujo desde el launcher en raiz, por ejemplo:
@@ -184,6 +186,7 @@ Opcionales recomendadas:
 - `GALENIUS_BATCH_SIZE`
 - `GALENIUS_OVERWRITE_EXISTING`
 - `GALENIUS_LOG_DIR`
+- `GALENIUS_QUEUE_SHEET_URL_B` (pestana alterna para evitar colisiones entre 2 dispositivos corriendo `run.bat` a la vez)
 
 ## Retencion De Logs
 
