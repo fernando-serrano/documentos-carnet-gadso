@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from pathlib import Path
 import os
 import sys
@@ -164,6 +165,67 @@ def test_hay_registros_en_proceso_cae_a_csv_si_la_api_falla():
         os.environ.pop("DRIVE_CREDENTIALS_JSON", None)
 
 
+def _fecha(hace_minutos: int) -> str:
+    return (datetime.now() - timedelta(minutes=hace_minutos)).strftime("%d/%m/%Y %H:%M:%S")
+
+
+def test_hay_registros_en_proceso_false_si_en_proceso_es_viejo():
+    os.environ.pop("WORKBOOK_LOCK_STALE_MINUTES", None)  # default 30 min
+    rows = {
+        "https://sheet-a": [
+            _fila("11111111", **{"ESTADO FOTO CARNÉ": "EN PROCESO W3", "FECHA TRAMITE": _fecha(45)}),
+        ]
+    }
+
+    def _run():
+        assert workbook_lock.hay_registros_en_proceso("https://sheet-a") is False
+
+    _con_lecturas(rows, _run)
+
+
+def test_hay_registros_en_proceso_true_si_en_proceso_es_reciente():
+    os.environ.pop("WORKBOOK_LOCK_STALE_MINUTES", None)
+    rows = {
+        "https://sheet-a": [
+            _fila("11111111", **{"ESTADO FOTO CARNÉ": "EN PROCESO W3", "FECHA TRAMITE": _fecha(5)}),
+        ]
+    }
+
+    def _run():
+        assert workbook_lock.hay_registros_en_proceso("https://sheet-a") is True
+
+    _con_lecturas(rows, _run)
+
+
+def test_hay_registros_en_proceso_respeta_env_var_de_vencimiento():
+    os.environ["WORKBOOK_LOCK_STALE_MINUTES"] = "10"
+    rows = {
+        "https://sheet-a": [
+            _fila("11111111", **{"ESTADO FOTO CARNÉ": "EN PROCESO W3", "FECHA TRAMITE": _fecha(15)}),
+        ]
+    }
+
+    def _run():
+        assert workbook_lock.hay_registros_en_proceso("https://sheet-a") is False
+
+    try:
+        _con_lecturas(rows, _run)
+    finally:
+        os.environ.pop("WORKBOOK_LOCK_STALE_MINUTES", None)
+
+
+def test_hay_registros_en_proceso_true_si_en_proceso_sin_fecha():
+    os.environ.pop("WORKBOOK_LOCK_STALE_MINUTES", None)
+    rows = {
+        "https://sheet-a": [_fila("11111111", **{"ESTADO FOTO CARNÉ": "EN PROCESO W3"})],  # FECHA TRAMITE vacia
+    }
+
+    def _run():
+        assert workbook_lock.hay_registros_en_proceso("https://sheet-a") is True
+
+    _con_lecturas(rows, _run)
+
+
 def test_hay_registros_en_proceso_usa_csv_si_no_hay_credenciales():
     os.environ.pop("DRIVE_CREDENTIALS_JSON", None)
     rows_csv = {"https://sheet-a": [_fila("11111111")]}
@@ -193,4 +255,8 @@ if __name__ == "__main__":
     test_hay_registros_en_proceso_prefiere_api_cuando_hay_credenciales()
     test_hay_registros_en_proceso_cae_a_csv_si_la_api_falla()
     test_hay_registros_en_proceso_usa_csv_si_no_hay_credenciales()
+    test_hay_registros_en_proceso_false_si_en_proceso_es_viejo()
+    test_hay_registros_en_proceso_true_si_en_proceso_es_reciente()
+    test_hay_registros_en_proceso_respeta_env_var_de_vencimiento()
+    test_hay_registros_en_proceso_true_si_en_proceso_sin_fecha()
     print("OK - test_workbook_lock")
