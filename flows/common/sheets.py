@@ -111,6 +111,28 @@ def read_sheet_rows(
     return rows, list(reader.fieldnames or [])
 
 
+# Errores transitorios de la Sheets API que se reintentan: 429 es la cuota por
+# minuto (p.ej. WriteRequestsPerMinutePerUser=60), que se libera sola al
+# cambiar la ventana; 500/503 son fallas momentaneas de Google.
+_API_STATUS_REINTENTABLES = {429, 500, 503}
+_API_REINTENTOS = 6
+_API_ESPERA_BASE_S = 2.0
+_API_ESPERA_MAX_S = 60.0
+
+
+def execute_con_reintento(request, *, reintentos: int = _API_REINTENTOS, espera_base_s: float = _API_ESPERA_BASE_S):
+    """Ejecuta un request de googleapiclient reintentando 429/500/503 con backoff exponencial."""
+    for intento in range(1, reintentos + 1):
+        try:
+            return request.execute()
+        except Exception as exc:
+            status = getattr(getattr(exc, "resp", None), "status", None)
+            if int(status or 0) not in _API_STATUS_REINTENTABLES or intento >= reintentos:
+                raise
+            espera = min(_API_ESPERA_MAX_S, espera_base_s * (2 ** (intento - 1)))
+            time.sleep(espera)
+
+
 def read_sheet_values_api(sheet_url: str, credentials_path: str) -> tuple[list[dict], list[str]]:
     """Lee la hoja via Sheets API v4 (autenticado), sin el cache del endpoint de exportacion CSV.
 
@@ -123,10 +145,10 @@ def read_sheet_values_api(sheet_url: str, credentials_path: str) -> tuple[list[d
     sheet_title = sheet_title_from_gid(service, spreadsheet_id, gid)
     safe_title = str(sheet_title or "").replace("'", "''")
 
-    response = service.spreadsheets().values().get(
+    response = execute_con_reintento(service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
         range=f"'{safe_title}'",
-    ).execute()
+    ))
     values = response.get("values", []) or []
     if not values:
         return [], []
@@ -181,10 +203,10 @@ def resolver_columna(fieldnames: list[str], candidatos: list[str]) -> str:
 
 
 def sheet_title_from_gid(service, spreadsheet_id: str, gid: str) -> str:
-    response = service.spreadsheets().get(
+    response = execute_con_reintento(service.spreadsheets().get(
         spreadsheetId=spreadsheet_id,
         fields="sheets(properties(sheetId,title))",
-    ).execute()
+    ))
     target_gid = int(str(gid or "0").strip() or "0")
     for sheet in response.get("sheets", []) or []:
         props = sheet.get("properties", {}) or {}
@@ -215,13 +237,13 @@ def update_sheet_cells_by_row(service, spreadsheet_id: str, sheet_title: str, ro
     if not data:
         return
 
-    service.spreadsheets().values().batchUpdate(
+    execute_con_reintento(service.spreadsheets().values().batchUpdate(
         spreadsheetId=spreadsheet_id,
         body={
             "valueInputOption": "RAW",
             "data": data,
         },
-    ).execute()
+    ))
 
 
 def update_sheet_row(
