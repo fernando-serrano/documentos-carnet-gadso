@@ -155,11 +155,23 @@ def _crear_directorio_lote(cfg: GaleniusConfig) -> tuple[str, object]:
     return lote_nombre, lote_dir
 
 
+# Recursos de terceros que Galenius referencia pero que pueden colgarse
+# (p.ej. CDN de Font Awesome descontinuado con IPv6 en agujero negro) y
+# bloquean domcontentloaded. Son cosmeticos, se abortan.
+_RECURSOS_BLOQUEADOS = ("netdna.bootstrapcdn.com",)
+
+
+def _bloquear_recursos_colgantes(context) -> None:
+    for host in _RECURSOS_BLOQUEADOS:
+        context.route(f"**://{host}/**", lambda route: route.abort())
+
+
 def _preparar_sesion_autenticada(cfg: GaleniusConfig, logger, event_logger, run_dir) -> Path:
     storage_state_path = run_dir / "galenius_storage_state.json"
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=cfg.headless, slow_mo=0)
         context = browser.new_context(no_viewport=True, ignore_https_errors=True, accept_downloads=True)
+        _bloquear_recursos_colgantes(context)
         page = context.new_page()
         try:
             logger.info("[GALENIUS] Preparando sesion autenticada")
@@ -300,6 +312,7 @@ def _procesar_cola_worker(worker_id: int, cfg: GaleniusConfig, logger, event_log
             ignore_https_errors=True,
             accept_downloads=True,
         )
+        _bloquear_recursos_colgantes(context)
         page = context.new_page()
         try:
             logger.info("[GALENIUS][%s] Worker iniciado | log_dir=%s", worker_tag, worker_dir)
